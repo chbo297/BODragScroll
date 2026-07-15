@@ -1,4 +1,8 @@
+#if DEBUG
+@_spi(BODragScrollDemoDiagnostics) import BODragScroll
+#else
 import BODragScroll
+#endif
 import UIKit
 
 @MainActor
@@ -6,6 +10,16 @@ final class SwiftDemoDragEngine: NSObject, DemoDragEngine {
     let implementation = DemoImplementation.swift
     let hostView = BODragScroll.BODragScrollView(frame: .zero)
     weak var delegate: DemoDragEngineDelegate?
+#if DEBUG
+    private enum DiagnosticMotionOwner: Equatable {
+        case panel
+        case participant(ObjectIdentifier)
+    }
+
+    private var diagnosticTouch = "0"
+    private var lastDiagnosticMotionOwner: DiagnosticMotionOwner?
+    private var lastDiagnosticMotionOwnerDescription: String?
+#endif
 
     var scrollView: UIScrollView { hostView }
     var panelView: UIView? {
@@ -32,6 +46,18 @@ final class SwiftDemoDragEngine: NSObject, DemoDragEngine {
 
     override init() {
         super.init()
+#if DEBUG
+        hostView._demoDiagnosticsSink = { [weak self] event in
+            if event.category == "Touch", event.fields["phase"] == "begin" {
+                self?.lastDiagnosticMotionOwner = nil
+                self?.lastDiagnosticMotionOwnerDescription = nil
+            }
+            if let touch = event.fields["touch"] {
+                self?.diagnosticTouch = touch
+            }
+            DemoDebugLogger.log(.swift, event.category, fields: event.fields)
+        }
+#endif
         hostView.behaviorProvider = self
         hostView.eventDelegate = self
         applyConfiguration()
@@ -77,6 +103,9 @@ final class SwiftDemoDragEngine: NSObject, DemoDragEngine {
     }
 
     func invalidate() {
+#if DEBUG
+        hostView._demoDiagnosticsSink = nil
+#endif
         hostView.behaviorProvider = nil
         hostView.eventDelegate = nil
         hostView.panelView = nil
@@ -98,8 +127,6 @@ final class SwiftDemoDragEngine: NSObject, DemoDragEngine {
         modern.bounce.forcesInnerTopBounce = configuration.bounce.forcesInnerTopBounce
         modern.capture.ignoresMultipleNestedWebScrollViews = configuration.capture.ignoresMultipleNestedWebScrollViews
         modern.capture.disablesPanelInteractionInWebView = configuration.capture.disablesPanelInteractionInWebView
-        modern.gesture.recognizesSimultaneouslyWithOtherGestures = configuration.gesture.recognizesSimultaneouslyWithOtherGestures
-        modern.gesture.failsOtherTapDuringDeceleration = configuration.gesture.failsOtherTapDuringDeceleration
         modern.movement.defaultStyle = configuration.movement.defaultStyle.modern
         modern.movement.lowVelocityThreshold = configuration.movement.lowVelocityThreshold
         modern.movement.highVelocityThreshold = configuration.movement.highVelocityThreshold
@@ -136,7 +163,25 @@ extension SwiftDemoDragEngine: BODragScrollBehaviorProvider {
         _ dragScrollView: BODragScroll.BODragScrollView,
         segmentsFor scrollView: UIScrollView
     ) -> [BODragScrollInnerScrollSegment]? {
-        delegate?.dragEngine(self, segmentsFor: scrollView)?.map {
+        let demoSegments = delegate?.dragEngine(self, segmentsFor: scrollView)
+#if DEBUG
+        if let demoSegments {
+            for (index, segment) in demoSegments.enumerated() {
+                DemoDebugLogger.log(
+                    .swift,
+                    "ProviderSegment",
+                    fields: [
+                        "index": String(index),
+                        "innerOffset": "\(segment.beginOffsetY.map(DemoDebugLogger.number) ?? "effectiveTop")->\(segment.endOffsetY.map(DemoDebugLogger.number) ?? "effectiveBottom")",
+                        "panelDisplayHeight": DemoDebugLogger.number(segment.displayHeight),
+                        "scrollView": DemoDebugLogger.describe(scrollView),
+                        "touch": diagnosticTouch
+                    ]
+                )
+            }
+        }
+#endif
+        return demoSegments?.map {
             .init(displayHeight: $0.displayHeight, beginOffsetY: $0.beginOffsetY, endOffsetY: $0.endOffsetY)
         }
     }
@@ -145,13 +190,43 @@ extension SwiftDemoDragEngine: BODragScrollBehaviorProvider {
         _ dragScrollView: BODragScroll.BODragScrollView,
         canCapture scrollView: UIScrollView
     ) -> Bool {
-        delegate?.dragEngine(self, canCapture: scrollView) ?? true
+        let result = delegate?.dragEngine(self, canCapture: scrollView) ?? true
+#if DEBUG
+        DemoDebugLogger.log(
+            .swift,
+            "CaptureEligibility",
+            fields: [
+                "canCapture": result ? "YES" : "NO",
+                "scrollView": DemoDebugLogger.describe(scrollView),
+                "touch": diagnosticTouch
+            ]
+        )
+#endif
+        return result
     }
 
     func dragScrollView(
         _ dragScrollView: BODragScroll.BODragScrollView,
         adjustCaptureProposal proposal: inout BODragScrollCaptureProposal
     ) {
+#if DEBUG
+        let proposedPrimaryBefore = proposal.primaryCandidateID
+        for (index, candidate) in proposal.candidates.enumerated() {
+            DemoDebugLogger.log(
+                .swift,
+                "CaptureCandidate",
+                fields: [
+                    "depth": String(candidate.hierarchyDepth),
+                    "index": String(index),
+                    "initialPriority": String(candidate.priority.rawValue),
+                    "isInitialPrimary": candidate.id == proposedPrimaryBefore ? "YES" : "NO",
+                    "scrollView": DemoDebugLogger.describe(candidate.scrollView),
+                    "touch": diagnosticTouch,
+                    "vertical": candidate.isVerticallyScrollable ? "YES" : "NO"
+                ]
+            )
+        }
+#endif
         var demo = DemoCaptureProposal(
             primaryCandidateID: proposal.primaryCandidateID,
             candidates: proposal.candidates.map(DemoCaptureCandidate.init),
@@ -166,14 +241,20 @@ extension SwiftDemoDragEngine: BODragScrollBehaviorProvider {
             }
             return candidate
         }
-    }
-
-    func dragScrollView(
-        _ dragScrollView: BODragScroll.BODragScrollView,
-        strategyFor gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> BODragScrollGestureStrategy? {
-        delegate?.dragEngine(self, strategyFor: gesture, otherGesture: otherGesture)?.modern
+#if DEBUG
+        let finalPrimary = proposal.primaryCandidateID
+        DemoDebugLogger.log(
+            .swift,
+            "CaptureProposal",
+            fields: [
+                "candidateCount": String(proposal.candidates.count),
+                "containsWebView": proposal.webView == nil ? "NO" : "YES",
+                "finalPrimary": proposal.candidates.first(where: { $0.id == finalPrimary })
+                    .map { DemoDebugLogger.describe($0.scrollView) } ?? "none",
+                "touch": diagnosticTouch
+            ]
+        )
+#endif
     }
 
     func dragScrollView(
@@ -231,15 +312,58 @@ extension SwiftDemoDragEngine: BODragScrollEventDelegate {
         didScroll update: BODragScrollUpdate
     ) {
         let source: DemoMotionSource
+#if DEBUG
+        let diagnosticOwner: DiagnosticMotionOwner
+        let diagnosticParticipant: UIScrollView?
+#endif
         switch update.source {
         case .panel:
             source = .panel
+#if DEBUG
+            diagnosticOwner = .panel
+            diagnosticParticipant = nil
+#endif
         case let .participant(scrollView):
             source = .participant(
                 scrollView,
                 name: scrollView.accessibilityIdentifier ?? String(describing: type(of: scrollView))
             )
+#if DEBUG
+            diagnosticOwner = .participant(ObjectIdentifier(scrollView))
+            diagnosticParticipant = scrollView
+#endif
         }
+#if DEBUG
+        if diagnosticOwner != lastDiagnosticMotionOwner {
+            let diagnosticOwnerDescription = diagnosticParticipant.map {
+                "inner:\(DemoDebugLogger.describe($0))"
+            } ?? "panel"
+            let motionKind: String
+            if hostView.isTracking || hostView.isDragging {
+                motionKind = "touch"
+            } else if hostView.isDecelerating {
+                motionKind = "deceleration"
+            } else if hostView.isAnimatingDisplayHeight {
+                motionKind = "programmatic-animation"
+            } else {
+                motionKind = "programmatic-or-layout"
+            }
+            DemoDebugLogger.log(
+                .swift,
+                "OwnerTransition",
+                fields: [
+                    "displayHeight": DemoDebugLogger.number(update.displayHeight),
+                    "from": lastDiagnosticMotionOwnerDescription ?? "none",
+                    "hostOffsetY": DemoDebugLogger.number(hostView.contentOffset.y),
+                    "motionKind": motionKind,
+                    "to": diagnosticOwnerDescription,
+                    "touch": diagnosticTouch
+                ]
+            )
+            lastDiagnosticMotionOwner = diagnosticOwner
+            lastDiagnosticMotionOwnerDescription = diagnosticOwnerDescription
+        }
+#endif
         delegate?.dragEngine(self, didScrollFrom: source)
     }
 
@@ -394,17 +518,6 @@ private extension DemoCaptureCandidate {
 private extension DemoCapturePriority {
     var modern: BODragScrollCapturePriority {
         BODragScrollCapturePriority(rawValue: rawValue) ?? .systemDefault
-    }
-}
-
-private extension DemoGestureStrategy {
-    var modern: BODragScrollGestureStrategy {
-        switch self {
-        case .simultaneous: return .simultaneous
-        case .panelFirst: return .panelFirst
-        case .otherFirst: return .otherFirst
-        case .systemDefault: return .systemDefault
-        }
     }
 }
 

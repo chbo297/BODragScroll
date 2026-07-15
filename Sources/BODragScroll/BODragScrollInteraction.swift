@@ -176,6 +176,9 @@ extension BODragScrollView {
         with event: UIEvent?,
         in view: UIView
     ) {
+#if DEBUG
+        debugBeginTouch(from: view)
+#endif
         let nativeState = nativeScrollState
         if lastMotionWasParticipant,
            primaryParticipantScrollView != nil,
@@ -190,6 +193,9 @@ extension BODragScrollView {
 
         let touchedWebView = beginCapture(from: view)
         didTouchWebView = touchedWebView != nil
+#if DEBUG
+        debugCaptureDidFinish(from: view)
+#endif
     }
 
     /// Forward target for `touchesShouldCancel(in:)` in the main class.
@@ -355,6 +361,25 @@ extension BODragScrollView: UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
+        let result = interaction_shouldRequireFailureOf(
+            gestureRecognizer,
+            otherGestureRecognizer: otherGestureRecognizer
+        )
+#if DEBUG
+        debugGestureArbitration(
+            callback: "shouldRequireFailureOf",
+            gestureRecognizer: gestureRecognizer,
+            otherGestureRecognizer: otherGestureRecognizer,
+            result: result
+        )
+#endif
+        return result
+    }
+
+    private func interaction_shouldRequireFailureOf(
+        _ gestureRecognizer: UIGestureRecognizer,
+        otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
         guard !isTouchCompletionGesture(gestureRecognizer),
               gestureRecognizer.view === self else {
             return false
@@ -404,6 +429,25 @@ extension BODragScrollView: UIGestureRecognizerDelegate {
     public func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        let result = interaction_shouldBeRequiredToFailBy(
+            gestureRecognizer,
+            otherGestureRecognizer: otherGestureRecognizer
+        )
+#if DEBUG
+        debugGestureArbitration(
+            callback: "shouldBeRequiredToFailBy",
+            gestureRecognizer: gestureRecognizer,
+            otherGestureRecognizer: otherGestureRecognizer,
+            result: result
+        )
+#endif
+        return result
+    }
+
+    private func interaction_shouldBeRequiredToFailBy(
+        _ gestureRecognizer: UIGestureRecognizer,
+        otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         guard !isTouchCompletionGesture(gestureRecognizer),
               gestureRecognizer.view === self else {
@@ -459,6 +503,25 @@ extension BODragScrollView: UIGestureRecognizerDelegate {
     public func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        let result = interaction_shouldRecognizeSimultaneouslyWith(
+            gestureRecognizer,
+            otherGestureRecognizer: otherGestureRecognizer
+        )
+#if DEBUG
+        debugGestureArbitration(
+            callback: "shouldRecognizeSimultaneouslyWith",
+            gestureRecognizer: gestureRecognizer,
+            otherGestureRecognizer: otherGestureRecognizer,
+            result: result
+        )
+#endif
+        return result
+    }
+
+    private func interaction_shouldRecognizeSimultaneouslyWith(
+        _ gestureRecognizer: UIGestureRecognizer,
+        otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         if isTouchCompletionGesture(gestureRecognizer) {
             return true

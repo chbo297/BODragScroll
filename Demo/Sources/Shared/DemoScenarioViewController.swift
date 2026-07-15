@@ -313,11 +313,6 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
 
     func adjustCaptureProposal(_ proposal: inout DemoCaptureProposal) {}
 
-    func gestureStrategy(
-        for gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> DemoGestureStrategy? { nil }
-
     func shouldBypassDetents(at displayHeight: CGFloat) -> Bool? { nil }
 
     func movementStyle(
@@ -466,24 +461,6 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
                 }.joined(separator: ",")
             ]
         )
-    }
-
-    func dragEngine(
-        _ engine: DemoDragEngine,
-        strategyFor gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> DemoGestureStrategy? {
-        let result = gestureStrategy(for: gesture, otherGesture: otherGesture)
-        recordTrace(
-            "gestureStrategy",
-            details: [
-                "gesture": String(describing: type(of: gesture)),
-                "otherGesture": String(describing: type(of: otherGesture)),
-                "otherView": otherGesture.view.map { String(describing: type(of: $0)) } ?? "nil",
-                "result": result.map { String(describing: $0) } ?? "nil"
-            ]
-        )
-        return result
     }
 
     func dragEngine(_ engine: DemoDragEngine, shouldBypassDetentsAt displayHeight: CGFloat) -> Bool? {

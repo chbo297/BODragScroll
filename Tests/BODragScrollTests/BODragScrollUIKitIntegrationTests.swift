@@ -981,6 +981,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testSingleResponderChainScrollViewBecomesPrimaryParticipant() throws {
         let (dragScrollView, panelView) = makeHost()
+        let captureDisplayHeight = dragScrollView.displayHeight
         let scrollView = makeScrollView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 300),
             contentHeight: 900
@@ -996,7 +997,117 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(session.participantChain.count, 1)
         XCTAssertTrue(session.primaryParticipant?.scrollView === scrollView)
         XCTAssertTrue(dragScrollView.primaryParticipantScrollView === scrollView)
-        XCTAssertNotNil(session.model)
+        let model = try XCTUnwrap(session.model)
+        XCTAssertTrue(model.detentDisplayHeights.isEmpty)
+
+        let participantSegments = model.segments.filter(\.isParticipantSegment)
+        let segment = try XCTUnwrap(participantSegments.first)
+        XCTAssertEqual(participantSegments.count, 1)
+        XCTAssertEqual(segment.displayHeight, captureDisplayHeight, accuracy: 0.001)
+
+        let midpoint = segment.outerStart + segment.outerLength * 0.5
+        let projection = model.projection(at: midpoint)
+        XCTAssertEqual(projection.displayHeight, captureDisplayHeight, accuracy: 0.001)
+        let projectedOffset = try XCTUnwrap(
+            projection.offset(for: session.participantChain[0].id)
+        )
+        XCTAssertEqual(
+            projectedOffset,
+            segment.innerStart + segment.innerLength * 0.5,
+            accuracy: 0.001
+        )
+    }
+
+    func testNoDetentAutomaticActivationPreservesNativeCurrentDisplayHeight() throws {
+        let (dragScrollView, panelView) = makeHost()
+        let requestedGeometryHeight: CGFloat = 321.123_456_789
+        var panelFrame = panelView.frame
+        panelFrame.origin.y = dragScrollView.bounds.height
+            + dragScrollView.contentOffset.y
+            - requestedGeometryHeight
+        dragScrollView.setPanelFrame(panelFrame)
+        let nativeDisplayHeight = dragScrollView.displayHeightForCurrentGeometry
+        XCTAssertNotEqual(nativeDisplayHeight, CGFloat(Float(nativeDisplayHeight)))
+        XCTAssertEqual(nativeDisplayHeight, requestedGeometryHeight, accuracy: 1e-12)
+
+        let scrollView = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 20, width: 40, height: 40))
+        scrollView.addSubview(leafView)
+        panelView.addSubview(scrollView)
+
+        dragScrollView.beginCapture(from: leafView)
+        defer { dragScrollView.endCapture() }
+
+        let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        let segment = try XCTUnwrap(model.segments.first(where: \.isParticipantSegment))
+        XCTAssertTrue(model.detentDisplayHeights.isEmpty)
+        XCTAssertEqual(segment.displayHeight, nativeDisplayHeight)
+    }
+
+    func testContinuationActivationPreservesNativeCurrentDisplayHeight() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let requestedGeometryHeight: CGFloat = 233.123_456_789
+        var panelFrame = panelView.frame
+        panelFrame.origin.y = dragScrollView.bounds.height
+            + dragScrollView.contentOffset.y
+            - requestedGeometryHeight
+        dragScrollView.setPanelFrame(panelFrame)
+        let nativeDisplayHeight = dragScrollView.displayHeightForCurrentGeometry
+        XCTAssertNotEqual(nativeDisplayHeight, CGFloat(Float(nativeDisplayHeight)))
+        XCTAssertEqual(nativeDisplayHeight, requestedGeometryHeight, accuracy: 1e-12)
+
+        let scrollView = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        scrollView.contentOffset.y = 123
+        let leafView = UIView(frame: CGRect(x: 0, y: 20, width: 40, height: 40))
+        scrollView.addSubview(leafView)
+        panelView.addSubview(scrollView)
+
+        var configuration = dragScrollView.configuration
+        configuration.handoff.offsetMismatch = .continueFromCurrentOffset
+        dragScrollView.configuration = configuration
+        dragScrollView.beginCapture(from: leafView)
+        defer { dragScrollView.endCapture() }
+
+        let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        let segment = try XCTUnwrap(model.segments.first(where: \.isParticipantSegment))
+        XCTAssertEqual(segment.displayHeight, nativeDisplayHeight)
+        XCTAssertEqual(
+            model.projection(at: dragScrollView.contentOffset.y).displayHeight,
+            nativeDisplayHeight,
+            accuracy: 1e-12
+        )
+    }
+
+    func testFixedActivationRetainsObjectiveCFloatInputSemantics() throws {
+        let (dragScrollView, panelView) = makeHost()
+        let requestedDisplayHeight: CGFloat = 321.123_456_789
+        let objectiveCDisplayHeight = CGFloat(Float(requestedDisplayHeight))
+        XCTAssertNotEqual(requestedDisplayHeight, objectiveCDisplayHeight)
+
+        var configuration = dragScrollView.configuration
+        configuration.handoff.innerScrollPlacement = .atDisplayHeight(requestedDisplayHeight)
+        dragScrollView.configuration = configuration
+
+        let scrollView = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 20, width: 40, height: 40))
+        scrollView.addSubview(leafView)
+        panelView.addSubview(scrollView)
+
+        dragScrollView.beginCapture(from: leafView)
+        defer { dragScrollView.endCapture() }
+
+        let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        let segment = try XCTUnwrap(model.segments.first(where: \.isParticipantSegment))
+        XCTAssertEqual(segment.displayHeight, objectiveCDisplayHeight)
     }
 
     func testNestedResponderChainBuildsPrimaryAndAncestorModelOwners() throws {

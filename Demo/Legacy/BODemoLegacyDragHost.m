@@ -35,7 +35,8 @@ typedef struct BODemoLegacyAttachInfo {
                               attachInfo:(BODemoLegacyAttachInfo *)attachInfo;
 @end
 
-/// Guards the byte-identical source implementation before it consumes its untagged UIKit
+/// Guards the bundled source implementation (with DEBUG diagnostics and synchronized source fixes)
+/// before it consumes its untagged UIKit
 /// terminals. A cancelled generation can otherwise deliver after a new one starts and clear the
 /// source's shared `_waitMayAnimationScroll` / `_waitDidTargetTo` state for the wrong movement.
 @interface BODemoLegacyTrackedDragView : BODragScrollView
@@ -286,8 +287,6 @@ typedef struct BODemoLegacyAttachInfo {
         _allowsPanelBottomBounce = YES;
         _preferredTopBounceOwner = BODemoLegacyBounceOwnerPanel;
         _preferredBottomBounceOwner = BODemoLegacyBounceOwnerInnerScrollView;
-        _recognizesSimultaneouslyWithOtherGestures = YES;
-        _failsOtherTapDuringDeceleration = YES;
         _automaticallyShowsInnerIndicator = YES;
         _defaultMovementStyle = BODemoLegacyMovementStyleSystemScroll;
         _animationSpeed = 1000;
@@ -313,8 +312,6 @@ typedef struct BODemoLegacyAttachInfo {
     copy.forcesInnerTopBounce = self.forcesInnerTopBounce;
     copy.ignoresMultipleNestedWebScrollViews = self.ignoresMultipleNestedWebScrollViews;
     copy.disablesPanelInteractionInWebView = self.disablesPanelInteractionInWebView;
-    copy.recognizesSimultaneouslyWithOtherGestures = self.recognizesSimultaneouslyWithOtherGestures;
-    copy.failsOtherTapDuringDeceleration = self.failsOtherTapDuringDeceleration;
     copy.automaticallyShowsInnerIndicator = self.automaticallyShowsInnerIndicator;
     copy.defaultMovementStyle = self.defaultMovementStyle;
     copy.animationSpeed = self.animationSpeed;
@@ -394,8 +391,8 @@ typedef struct BODemoLegacyAttachInfo {
 }
 
 - (BOOL)legacyHasPendingSystemScrollAnimation {
-    // This temporary comparison adapter is intentionally coupled to the bundled, byte-identical
-    // source implementation. KVC reads its private wait flag without modifying that source, so a
+    // This temporary comparison adapter is intentionally coupled to the bundled source
+    // implementation. KVC reads its private wait flag without changing its behavior, so a
     // relayout only synthesizes the terminal delegate callback that UIKit may omit for a genuinely
     // cancelled animated content-offset operation.
     return [[self.legacyView valueForKey:@"waitMayAnimationScroll"] boolValue];
@@ -457,8 +454,6 @@ typedef struct BODemoLegacyAttachInfo {
 
     view.ignoreWebMulInnerScroll = configuration.ignoresMultipleNestedWebScrollViews;
     view.inhibitPanelForWebView = configuration.disablesPanelInteractionInWebView;
-    view.shouldSimultaneouslyWithOtherGesture = configuration.recognizesSimultaneouslyWithOtherGestures;
-    view.shouldFailureOtherTapGestureWhenDecelerating = configuration.failsOtherTapDuringDeceleration;
     view.autoShowInnerIndictor = configuration.automaticallyShowsInnerIndicator;
 
     view.defaultDecelerateStyle = [self legacyStyleForDemoStyle:configuration.defaultMovementStyle];
@@ -582,7 +577,7 @@ typedef struct BODemoLegacyAttachInfo {
     BOOL wasDecelerating = self.legacyView.isDecelerating;
     if (wasDecelerating) {
         // Arm before stopping a simultaneous system animation so a synchronous old deceleration
-        // callback cannot enter the byte-identical source with the next owner's shared state.
+        // callback cannot enter the bundled source with the next owner's shared state.
         [self.legacyView armCancelledDecelerationGeneration];
     }
     [self retirePendingSystemOwnership];
@@ -825,15 +820,6 @@ typedef struct BODemoLegacyAttachInfo {
             }
         }
     }
-}
-
-- (NSInteger)dragScrollView:(BODragScrollView *)dragScrollView
-    recognizeStrategyForGes:(UIGestureRecognizer *)ges
-                   otherGes:(UIGestureRecognizer *)otherGes {
-    BODemoLegacyGestureStrategy strategy = [self.delegate legacyDragHost:self
-                                                      strategyForGesture:ges
-                                                            otherGesture:otherGes];
-    return strategy == BODemoLegacyGestureStrategyDefault ? NSNotFound : strategy;
 }
 
 - (BODragScrollDecelerateStyle)dragScrollViewDecelerate:(BODragScrollView *)dragScrollView

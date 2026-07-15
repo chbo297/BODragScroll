@@ -41,6 +41,9 @@ final class BODragScrollRuntimeState {
     let scrolling = BODragScrollScrollingState()
     let transition = BODragScrollTransitionState()
     let interaction = BODragScrollInteractionState()
+#if DEBUG
+    let debug = BODragScrollDebugState()
+#endif
 
     /// Nesting-safe replacement for the OC implementation's single `innerSetting` Boolean.
     var mutationDepth = 0
@@ -308,7 +311,11 @@ public final class BODragScrollView: UIScrollView {
     }
 
     public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        interaction_gestureRecognizerShouldBegin(gestureRecognizer)
+        let result = interaction_gestureRecognizerShouldBegin(gestureRecognizer)
+#if DEBUG
+        debugGestureShouldBegin(gestureRecognizer, result: result)
+#endif
+        return result
     }
 
     public override func willMove(toWindow newWindow: UIWindow?) {

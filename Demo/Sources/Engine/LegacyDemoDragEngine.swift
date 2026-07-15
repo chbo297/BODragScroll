@@ -146,8 +146,6 @@ final class LegacyDemoDragEngine: NSObject, DemoDragEngine {
         legacy.forcesInnerTopBounce = configuration.bounce.forcesInnerTopBounce
         legacy.ignoresMultipleNestedWebScrollViews = configuration.capture.ignoresMultipleNestedWebScrollViews
         legacy.disablesPanelInteractionInWebView = configuration.capture.disablesPanelInteractionInWebView
-        legacy.recognizesSimultaneouslyWithOtherGestures = configuration.gesture.recognizesSimultaneouslyWithOtherGestures
-        legacy.failsOtherTapDuringDeceleration = configuration.gesture.failsOtherTapDuringDeceleration
         legacy.automaticallyShowsInnerIndicator = configuration.indicator.automaticallyShowsInnerIndicator
         legacy.defaultMovementStyle = configuration.movement.defaultStyle.legacy
         legacy.animationSpeed = configuration.movement.speed
@@ -250,19 +248,6 @@ extension LegacyDemoDragEngine: @preconcurrency BODemoLegacyDragHostDelegate {
             adjustments["catchSV"] = primaryCandidate.scrollView
         }
         return adjustments
-    }
-
-    func legacyHost(
-        _ host: BODemoLegacyDragHost,
-        strategyFor gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> BODemoLegacyGestureStrategy {
-        guard let strategy = delegate?.dragEngine(
-            self,
-            strategyFor: gesture,
-            otherGesture: otherGesture
-        ) else { return .default }
-        return strategy.legacy
     }
 
     func legacyHost(
@@ -411,17 +396,6 @@ private extension DemoOffsetMismatchPolicy {
 private extension DemoBounceOwner {
     var legacy: BODemoLegacyBounceOwner {
         self == .panel ? .panel : .innerScrollView
-    }
-}
-
-private extension DemoGestureStrategy {
-    var legacy: BODemoLegacyGestureStrategy {
-        switch self {
-        case .simultaneous: return .simultaneous
-        case .panelFirst: return .panelFirst
-        case .otherFirst: return .otherFirst
-        case .systemDefault: return .systemDefault
-        }
     }
 }
 

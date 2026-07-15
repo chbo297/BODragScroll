@@ -466,6 +466,8 @@ extension BODragScrollView {
         return executeMovement(transaction: transaction, animated: animated, options: options)
     }
 
+    // MARK: Layout deferral and invalidation
+
     /// Called by the layout phase once panel geometry, insets, and content size are valid.
     /// Announces a non-animated pre-layout target after the sizing provider has resolved its final
     /// value but before geometry changes. False means the callback synchronously superseded it.
@@ -771,6 +773,8 @@ private extension BODragScrollView {
         return transaction
     }
 
+    // MARK: Movement driver selection and execution
+
     @discardableResult
     func executeMovement(
         transaction: BODragScrollMovementTransaction,
@@ -934,6 +938,8 @@ private extension BODragScrollView {
         return configuredStyle.isAutomatic ? .systemScroll : configuredStyle
     }
 
+    // MARK: View-animation driver
+
     func startViewAnimation(
         to targetContentOffset: CGPoint,
         transaction: BODragScrollMovementTransaction,
@@ -1078,6 +1084,8 @@ private extension BODragScrollView {
         }
     }
 
+    // MARK: System-driven settlement monitoring
+
     /// UIKit's animation-end callback carries no animation identifier, so a delayed callback from a
     /// cancelled animation cannot itself be trusted to settle the current transaction. Instead,
     /// sample the transaction-specific target until the scroll axis is physically stable. A stale
@@ -1211,6 +1219,8 @@ private extension BODragScrollView {
             )
         }
     }
+
+    // MARK: Interruption, replacement, and completion
 
     func interruptRunningMovement(
         outcome: BODragScrollMovementOutcome,
@@ -1900,6 +1910,8 @@ extension BODragScrollView: UIScrollViewDelegate {
             : .dragWithoutDeceleration
     }
 
+    // MARK: Drag and deceleration settlement
+
     public func scrollViewDidEndDragging(
         _ scrollView: UIScrollView,
         willDecelerate decelerate: Bool
@@ -2013,6 +2025,8 @@ extension BODragScrollView: UIScrollViewDelegate {
         }
         eventDelegate?.dragScrollViewDidEndScrollingAnimation(self)
     }
+
+    // MARK: Scroll-to-top
 
     public func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
         let transactionEpoch = runtime.transition.nextTransactionID

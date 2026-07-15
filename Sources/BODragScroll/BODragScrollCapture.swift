@@ -944,9 +944,14 @@ extension BODragScrollView {
         } catch {
             // Provider data and UIKit geometry are external inputs. Fail closed for this capture
             // pass instead of terminating a debug build; a later layout/KVO/reload pass retries.
+#if DEBUG
+            debugModelBuildFailed(error)
+#endif
             return nil
         }
     }
+
+    // MARK: Participant segment planning
 
     private func makeParticipantSegments(
         session: BODragScrollCaptureSession,
@@ -995,15 +1000,17 @@ extension BODragScrollView {
             // ancestor. In that branch only the explicit display height is retained; the nested
             // chain contributes each scroll view's complete offset range.
             displayScalar = explicit.displayHeight
+        } else if forceCurrentActivation {
+            // This value is measured from the current UIKit geometry. It never passed through an
+            // Objective-C NSNumber boundary, so preserving CGFloat precision is part of its source
+            // semantics (and matters when rebuilding a continuation segment at the exact position).
+            displayScalar = .native(currentDisplayHeight)
         } else {
-            let activationHeight = forceCurrentActivation
-                ? currentDisplayHeight
-                : automaticActivationHeight(
-                    for: scrollView,
-                    currentDisplayHeight: currentDisplayHeight,
-                    detentHeights: smartDetentHeights
-                )
-            displayScalar = ScrollSourceScalar.objectiveCNumber(activationHeight)
+            displayScalar = automaticActivationScalar(
+                for: scrollView,
+                currentDisplayHeight: currentDisplayHeight,
+                detentHeights: smartDetentHeights
+            )
         }
 
         // The pure nested builder represents the real primary -> participating-ancestor chain and may split
@@ -1092,24 +1099,30 @@ extension BODragScrollView {
         return result.isEmpty ? nil : result
     }
 
-    private func automaticActivationHeight(
+    private func automaticActivationScalar(
         for scrollView: UIScrollView,
         currentDisplayHeight: CGFloat,
         detentHeights: [CGFloat]
-    ) -> CGFloat {
+    ) -> ScrollSourceScalar {
         switch configuration.handoff.innerScrollPlacement {
         case .fromTouchedPosition:
-            return currentDisplayHeight
+            return .native(currentDisplayHeight)
         case .atDisplayHeight(let height):
-            return height
+            // Mirrors `prefDragInnerScrollDisplayH`, which the Objective-C implementation reads
+            // through NSNumber.floatValue.
+            return .objectiveCNumber(height)
         case .afterPanelFullyDisplayed:
-            return detentForFullyDisplayed(scrollView, detentHeights: detentHeights)
-                ?? maximumConfiguredDisplayHeight
+            return .native(
+                detentForFullyDisplayed(scrollView, detentHeights: detentHeights)
+                    ?? maximumConfiguredDisplayHeight
+            )
         case .automatic:
             break
         }
 
-        guard !detentHeights.isEmpty else { return currentDisplayHeight }
+        // An empty detent list means the panel moves continuously; it does not disable coordinated
+        // participant scrolling. Build the default segment at the touch's current display height.
+        guard !detentHeights.isEmpty else { return .native(currentDisplayHeight) }
         let originY = panelOriginY(of: scrollView)
         let scrollHeight = max(scrollView.frame.height, 1)
         let minimumRatio = configuration.handoff.minimumInnerVisibilityRatio
@@ -1123,7 +1136,7 @@ extension BODragScrollView {
         for index in startIndex..<detentHeights.count {
             let detent = detentHeights[index]
             if (detent - originY) / scrollHeight >= minimumRatio {
-                return detent
+                return .native(detent)
             }
         }
 
@@ -1136,8 +1149,8 @@ extension BODragScrollView {
         )
         let fallback = detentHeights[lowerIndex]
         return (fallback - originY) / scrollHeight >= minimumRatio
-            ? fallback
-            : currentDisplayHeight
+            ? .native(fallback)
+            : .native(currentDisplayHeight)
     }
 
     private func detentForFullyDisplayed(
@@ -1175,6 +1188,8 @@ extension BODragScrollView {
         }
         return panelView.convert(scrollView.frame, from: superview).minY
     }
+
+    // MARK: Geometry snapshots and model reconciliation
 
     private func nestedSnapshots(for session: BODragScrollCaptureSession) -> [NestedParticipantSnapshot] {
         var result: [NestedParticipantSnapshot] = []
@@ -1339,6 +1354,8 @@ extension BODragScrollView {
         // continuation model instead of leaving the capture permanently unresolved.
         return 3
     }
+
+    // MARK: Projection application and native handoff
 
     func applyParticipantOffsets(_ projection: Projection, session: BODragScrollCaptureSession) {
         let operationEpoch = runtime.capture.operationEpoch

@@ -1,7 +1,35 @@
 import UIKit
 
-final class FreePanelViewController: DemoScenarioViewController {
+final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDelegate {
+    private enum ContentAmount: Int, Equatable {
+        case smaller
+        case equal
+        case larger
+
+        var code: String {
+            switch self {
+            case .smaller: return "A"
+            case .equal: return "B"
+            case .larger: return "C"
+            }
+        }
+    }
+
+    private struct ContentGeometry: Equatable {
+        let amount: ContentAmount
+        let boundsHeight: CGFloat
+        let insetTop: CGFloat
+        let insetBottom: CGFloat
+    }
+
     private let contentScrollView = UIScrollView()
+    private let contentAmountControl = UISegmentedControl(items: ["A 少于", "B 等于", "C 大于"])
+    private let contentMetricsLabel = UILabel()
+    private let contentDocumentView = UIView()
+    private var contentHeightConstraint: NSLayoutConstraint?
+    private var selectedContentAmount: ContentAmount = .larger
+    private var appliedContentGeometry: ContentGeometry?
+    private var shouldResetContentOffset = true
 
     init(implementation: DemoImplementation = .swift) {
         super.init(
@@ -20,6 +48,17 @@ final class FreePanelViewController: DemoScenarioViewController {
         FreePanelViewController(implementation: implementation)
     }
 
+    override func transferComparisonSettings(to counterpart: DemoScenarioViewController) {
+        guard let counterpart = counterpart as? FreePanelViewController else { return }
+        counterpart.setContentAmount(selectedContentAmount, announcesChange: false)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        panelView.layoutIfNeeded()
+        applyContentGeometry(resetOffset: false)
+    }
+
     override func detentHeights(for viewportSize: CGSize) -> [CGFloat] { [] }
 
     override func minimumDisplayHeight(for viewportSize: CGSize) -> CGFloat? { 104 }
@@ -31,67 +70,295 @@ final class FreePanelViewController: DemoScenarioViewController {
     }
 
     override func configureContent(in contentView: UIView) {
-        let first = DemoCardView(
-            title: "功能与操作",
-            detail: "功能：演示没有吸附点时，固定尺寸面板在最小与最大展示高度之间连续移动。\n操作：在面板头部上下拖动并快速甩动，观察面板停在连续位置；内容区可独立滚动，点击底部按钮验证程序化收起。",
-            tint: DemoPalette.orange
-        )
-        let second = DemoCardView(
-            title: "连续停止",
-            detail: "这里不配置 detentHeights。慢拖或快速甩动后，面板可以停在最小与最大边界之间的连续位置。",
-            tint: DemoPalette.purple
-        )
-        let third = DemoCardView(
-            title: "实时事件",
-            detail: "顶部黑色 HUD 显示展示高度、当前运动来源以及最新生命周期事件。",
-            tint: DemoPalette.teal
-        )
+        let controlSurface = UIView()
+        controlSurface.backgroundColor = DemoPalette.elevatedSurface
+        controlSurface.layer.cornerRadius = 16
+        controlSurface.translatesAutoresizingMaskIntoConstraints = false
 
-        let collapseButton = DemoControlFactory.button(title: "回到最小展示高度", tint: DemoPalette.orange)
+        let amountTitle = UILabel()
+        amountTitle.text = "内部有效内容高（contentSize + 上下 inset）"
+        amountTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        amountTitle.textColor = DemoPalette.secondaryInk
+        amountTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let collapseButton = UIButton(type: .system)
+        collapseButton.setTitle("收起", for: .normal)
+        collapseButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        collapseButton.setTitleColor(DemoPalette.orange, for: .normal)
+        collapseButton.backgroundColor = DemoPalette.orange.withAlphaComponent(0.12)
+        collapseButton.layer.cornerRadius = 10
         collapseButton.accessibilityIdentifier = "free.collapse"
         collapseButton.addTarget(self, action: #selector(collapsePanel), for: .touchUpInside)
+        collapseButton.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = UIStackView(arrangedSubviews: [first, second, third, collapseButton])
+        contentAmountControl.selectedSegmentIndex = selectedContentAmount.rawValue
+        contentAmountControl.accessibilityIdentifier = "free.contentAmount"
+        contentAmountControl.accessibilityLabel = "内部 ScrollView 内容高度"
+        contentAmountControl.addTarget(self, action: #selector(contentAmountChanged(_:)), for: .valueChanged)
+        contentAmountControl.translatesAutoresizingMaskIntoConstraints = false
+
+        contentMetricsLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
+        contentMetricsLabel.textColor = DemoPalette.ink
+        contentMetricsLabel.numberOfLines = 2
+        contentMetricsLabel.isAccessibilityElement = true
+        contentMetricsLabel.accessibilityIdentifier = "free.contentGeometry"
+        contentMetricsLabel.accessibilityLabel = "内部 ScrollView 内容几何"
+        contentMetricsLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        controlSurface.addSubview(amountTitle)
+        controlSurface.addSubview(collapseButton)
+        controlSurface.addSubview(contentAmountControl)
+        controlSurface.addSubview(contentMetricsLabel)
+
+        let markerTexts = [
+            "功能：连续拖动自由面板，不配置中间吸附点",
+            "操作：切换 A / B / C，再在此内容区向上滑动",
+            "A / B 的内部滚动距离为 0，C 提供 600pt 以上滚动范围",
+            "顶部 HUD 可观察 OC / Swift 的回调与运动来源"
+        ]
+        let markers = (1...18).map { index -> UIView in
+            let marker = UIView()
+            marker.backgroundColor = index.isMultiple(of: 2)
+                ? DemoPalette.orange.withAlphaComponent(0.11)
+                : DemoPalette.purple.withAlphaComponent(0.09)
+            marker.layer.cornerRadius = 13
+            marker.heightAnchor.constraint(equalToConstant: 46).isActive = true
+
+            let label = UILabel()
+            label.text = index <= markerTexts.count
+                ? markerTexts[index - 1]
+                : String(format: "内部内容区块 %02d", index)
+            label.font = .systemFont(ofSize: 13, weight: .semibold)
+            label.textColor = DemoPalette.secondaryInk
+            label.numberOfLines = 2
+            label.isAccessibilityElement = index <= markerTexts.count
+            if index <= markerTexts.count {
+                label.accessibilityIdentifier = "free.instructions.\(index)"
+            }
+            label.translatesAutoresizingMaskIntoConstraints = false
+            marker.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: marker.leadingAnchor, constant: 14),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: marker.trailingAnchor, constant: -14),
+                label.centerYAnchor.constraint(equalTo: marker.centerYAnchor)
+            ])
+            return marker
+        }
+        let stack = UIStackView(arrangedSubviews: markers)
         stack.axis = .vertical
-        stack.spacing = 14
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
-        contentScrollView.alwaysBounceVertical = true
+
+        contentDocumentView.backgroundColor = DemoPalette.surface
+        contentDocumentView.layer.cornerRadius = 18
+        contentDocumentView.clipsToBounds = true
+        contentDocumentView.translatesAutoresizingMaskIntoConstraints = false
+        contentDocumentView.addSubview(stack)
+
+        contentScrollView.alwaysBounceVertical = false
         contentScrollView.scrollsToTop = false
+        contentScrollView.delegate = self
+        contentScrollView.contentInsetAdjustmentBehavior = .never
+        contentScrollView.contentInset = UIEdgeInsets(top: 12, left: 0, bottom: 16, right: 0)
+        contentScrollView.verticalScrollIndicatorInsets = contentScrollView.contentInset
         contentScrollView.accessibilityIdentifier = "freePanelContentScroll"
         contentScrollView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(controlSurface)
         contentView.addSubview(contentScrollView)
-        contentScrollView.addSubview(stack)
+        contentScrollView.addSubview(contentDocumentView)
+
+        let contentHeightConstraint = contentDocumentView.heightAnchor.constraint(equalToConstant: 1)
+        self.contentHeightConstraint = contentHeightConstraint
 
         NSLayoutConstraint.activate([
+            controlSurface.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 18),
+            controlSurface.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -18),
+            controlSurface.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            controlSurface.heightAnchor.constraint(equalToConstant: 112),
+
+            amountTitle.leadingAnchor.constraint(equalTo: controlSurface.leadingAnchor, constant: 12),
+            amountTitle.topAnchor.constraint(equalTo: controlSurface.topAnchor, constant: 9),
+            amountTitle.trailingAnchor.constraint(lessThanOrEqualTo: collapseButton.leadingAnchor, constant: -8),
+
+            collapseButton.trailingAnchor.constraint(equalTo: controlSurface.trailingAnchor, constant: -10),
+            collapseButton.centerYAnchor.constraint(equalTo: amountTitle.centerYAnchor),
+            collapseButton.widthAnchor.constraint(equalToConstant: 52),
+            collapseButton.heightAnchor.constraint(equalToConstant: 26),
+
+            contentAmountControl.leadingAnchor.constraint(equalTo: controlSurface.leadingAnchor, constant: 10),
+            contentAmountControl.trailingAnchor.constraint(equalTo: controlSurface.trailingAnchor, constant: -10),
+            contentAmountControl.topAnchor.constraint(equalTo: amountTitle.bottomAnchor, constant: 6),
+            contentAmountControl.heightAnchor.constraint(equalToConstant: 32),
+
+            contentMetricsLabel.leadingAnchor.constraint(equalTo: controlSurface.leadingAnchor, constant: 12),
+            contentMetricsLabel.trailingAnchor.constraint(equalTo: controlSurface.trailingAnchor, constant: -12),
+            contentMetricsLabel.topAnchor.constraint(equalTo: contentAmountControl.bottomAnchor, constant: 5),
+            contentMetricsLabel.bottomAnchor.constraint(lessThanOrEqualTo: controlSurface.bottomAnchor, constant: -6),
+
             contentScrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             contentScrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            contentScrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            contentScrollView.topAnchor.constraint(equalTo: controlSurface.bottomAnchor, constant: 10),
             contentScrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            contentScrollView.contentLayoutGuide.widthAnchor.constraint(
-                equalTo: contentScrollView.frameLayoutGuide.widthAnchor
-            ),
-            stack.leadingAnchor.constraint(
+
+            contentDocumentView.leadingAnchor.constraint(
                 equalTo: contentScrollView.contentLayoutGuide.leadingAnchor,
                 constant: 18
             ),
-            stack.trailingAnchor.constraint(
+            contentDocumentView.trailingAnchor.constraint(
                 equalTo: contentScrollView.contentLayoutGuide.trailingAnchor,
                 constant: -18
             ),
-            stack.topAnchor.constraint(equalTo: contentScrollView.contentLayoutGuide.topAnchor, constant: 18),
-            stack.bottomAnchor.constraint(equalTo: contentScrollView.contentLayoutGuide.bottomAnchor, constant: -18)
+            contentDocumentView.topAnchor.constraint(equalTo: contentScrollView.contentLayoutGuide.topAnchor),
+            contentDocumentView.bottomAnchor.constraint(equalTo: contentScrollView.contentLayoutGuide.bottomAnchor),
+            contentDocumentView.widthAnchor.constraint(
+                equalTo: contentScrollView.frameLayoutGuide.widthAnchor,
+                constant: -36
+            ),
+            contentHeightConstraint,
+
+            stack.leadingAnchor.constraint(equalTo: contentDocumentView.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: contentDocumentView.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: contentDocumentView.topAnchor, constant: 12)
         ])
     }
 
-    override func canCapture(_ scrollView: UIScrollView) -> Bool {
-        scrollView !== contentScrollView
+    @objc private func contentAmountChanged(_ sender: UISegmentedControl) {
+        guard let amount = ContentAmount(rawValue: sender.selectedSegmentIndex) else { return }
+        setContentAmount(amount, announcesChange: true)
     }
 
-    override func gestureStrategy(
-        for gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> DemoGestureStrategy? {
-        otherGesture === contentScrollView.panGestureRecognizer ? .otherFirst : nil
+    private func setContentAmount(_ amount: ContentAmount, announcesChange: Bool) {
+        selectedContentAmount = amount
+        contentAmountControl.selectedSegmentIndex = amount.rawValue
+        appliedContentGeometry = nil
+        shouldResetContentOffset = true
+        applyContentGeometry(resetOffset: true)
+        if announcesChange {
+            recordEvent("内部内容切换为 \(amount.code) · \(displayRelation(for: amount))")
+        }
+    }
+
+    private func applyContentGeometry(resetOffset: Bool) {
+        let boundsHeight = contentScrollView.bounds.height
+        let inset = contentScrollView.adjustedContentInset
+        guard boundsHeight > 0,
+              let contentHeightConstraint else { return }
+
+        let geometry = ContentGeometry(
+            amount: selectedContentAmount,
+            boundsHeight: boundsHeight,
+            insetTop: inset.top,
+            insetBottom: inset.bottom
+        )
+        let geometryChanged = geometry != appliedContentGeometry
+        let needsOffsetReset = resetOffset || shouldResetContentOffset
+        guard geometryChanged || needsOffsetReset else {
+            updateContentMetrics()
+            return
+        }
+
+        let equalContentHeight = max(0, boundsHeight - inset.top - inset.bottom)
+        let targetContentHeight: CGFloat
+        switch selectedContentAmount {
+        case .smaller:
+            let underflow = min(80, equalContentHeight * 0.5)
+            targetContentHeight = max(0, equalContentHeight - underflow)
+        case .equal:
+            targetContentHeight = equalContentHeight
+        case .larger:
+            targetContentHeight = equalContentHeight + max(600, boundsHeight)
+        }
+
+        contentHeightConstraint.constant = targetContentHeight
+        contentScrollView.layoutIfNeeded()
+        appliedContentGeometry = geometry
+
+        let minimumOffsetY = -contentScrollView.adjustedContentInset.top
+        let maximumOffsetY = max(
+            targetContentHeight + contentScrollView.adjustedContentInset.bottom - boundsHeight,
+            minimumOffsetY
+        )
+        if needsOffsetReset || selectedContentAmount != .larger {
+            contentScrollView.setContentOffset(
+                CGPoint(x: 0, y: minimumOffsetY),
+                animated: false
+            )
+            shouldResetContentOffset = false
+        } else {
+            let clampedOffsetY = min(maximumOffsetY, max(minimumOffsetY, contentScrollView.contentOffset.y))
+            if clampedOffsetY != contentScrollView.contentOffset.y {
+                contentScrollView.setContentOffset(
+                    CGPoint(x: contentScrollView.contentOffset.x, y: clampedOffsetY),
+                    animated: false
+                )
+            }
+        }
+        updateContentMetrics()
+        dragEngine.reloadScrollMetrics()
+    }
+
+    private func updateContentMetrics() {
+        let boundsHeight = contentScrollView.bounds.height
+        guard boundsHeight > 0 else { return }
+        let inset = contentScrollView.adjustedContentInset
+        let contentHeight = contentScrollView.contentSize.height
+        let effectiveHeight = contentHeight + inset.top + inset.bottom
+        let scrollableDistance = max(0, effectiveHeight - boundsHeight)
+        let minimumOffsetY = -inset.top
+        let maximumOffsetY = max(contentHeight + inset.bottom - boundsHeight, minimumOffsetY)
+        let difference = effectiveHeight - boundsHeight
+        let pixel = 1 / max(view.window?.screen.scale ?? traitCollection.displayScale, 1)
+        let relation: String
+        let symbol: String
+        if difference < -pixel {
+            relation = "less"
+            symbol = "<"
+        } else if difference > pixel {
+            relation = "greater"
+            symbol = ">"
+        } else {
+            relation = "equal"
+            symbol = "="
+        }
+
+        contentMetricsLabel.text = String(
+            format: "有效 %.1f %@ 可视 %.1f\ncontent %.1f + inset %.1f/%.1f",
+            effectiveHeight,
+            symbol,
+            boundsHeight,
+            contentHeight,
+            inset.top,
+            inset.bottom
+        )
+        let marker = String(
+            format: "mode=%@;content=%.6f;bounds=%.6f;insetTop=%.6f;insetBottom=%.6f;effective=%.6f;scrollable=%.6f;offsetY=%.6f;minimumOffsetY=%.6f;maximumOffsetY=%.6f;relation=%@",
+            selectedContentAmount.code,
+            contentHeight,
+            boundsHeight,
+            inset.top,
+            inset.bottom,
+            effectiveHeight,
+            scrollableDistance,
+            contentScrollView.contentOffset.y,
+            minimumOffsetY,
+            maximumOffsetY,
+            relation
+        )
+        contentMetricsLabel.accessibilityValue = marker
+        contentScrollView.accessibilityValue = marker
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView === contentScrollView else { return }
+        updateContentMetrics()
+    }
+
+    private func displayRelation(for amount: ContentAmount) -> String {
+        switch amount {
+        case .smaller: return "有效内容小于可视区"
+        case .equal: return "有效内容等于可视区"
+        case .larger: return "有效内容大于可视区"
+        }
     }
 
     @objc private func collapsePanel() {
@@ -166,7 +433,7 @@ final class MovementLabViewController: DemoScenarioViewController {
 
         let instructionsCard = DemoCardView(
             title: "功能与操作",
-            detail: "功能：比较三档吸附、非吸附区、系统滚动动画、View 动画和程序化移动。\n操作：先拖动面板头部并释放观察吸附；再切换动画方式并点击目标高度；开启非吸附区后在低档与中档之间释放；最后运行中断演示。内容区可独立滚动以访问全部控件。",
+            detail: "功能：比较三档吸附、非吸附区、系统滚动动画、View 动画和程序化移动。\n操作：先拖动面板头部并释放观察吸附；再切换动画方式并点击目标高度；开启非吸附区后在低档与中档之间释放；最后运行中断演示。控件列表由组件按默认规则捕获，在面板展开后可继续滚动访问。",
             tint: DemoPalette.purple
         )
 
@@ -175,7 +442,6 @@ final class MovementLabViewController: DemoScenarioViewController {
             detail: "automatic 先询问 behavior provider，再使用 configuration 默认值。",
             tint: DemoPalette.purple
         )
-        styleCard.stackView.addArrangedSubview(styleControl)
 
         let buttonsCard = DemoCardView(
             title: "目标高度",
@@ -185,13 +451,12 @@ final class MovementLabViewController: DemoScenarioViewController {
         let low = movementButton(title: "最低", tag: 0)
         let middle = movementButton(title: "中间", tag: 1)
         let high = movementButton(title: "最高", tag: 2)
-        let nearest = DemoControlFactory.button(title: "吸附到最近点", tint: DemoPalette.teal)
+        let nearest = DemoControlFactory.button(title: "最近吸附", tint: DemoPalette.teal)
         nearest.accessibilityIdentifier = "movement.nearest"
         nearest.addTarget(self, action: #selector(settleNearest), for: .touchUpInside)
-        let interruptButton = DemoControlFactory.button(title: "运行中断演示", tint: DemoPalette.red)
+        let interruptButton = DemoControlFactory.button(title: "中断演示", tint: DemoPalette.red)
         interruptButton.accessibilityIdentifier = "movement.interrupt"
         interruptButton.addTarget(self, action: #selector(runInterruptionDemo), for: .touchUpInside)
-        buttonsCard.stackView.addArrangedSubview(buttonGrid([low, middle]))
 
         let rangeCard = DemoCardView(
             title: "释放目标",
@@ -200,24 +465,27 @@ final class MovementLabViewController: DemoScenarioViewController {
         )
         nonSnappingSwitch.addTarget(self, action: #selector(nonSnappingChanged), for: .valueChanged)
 
-        // These two actions must remain reachable while the panel itself is between detents. If
-        // they lived inside the long controls document, scrolling to them could move the host and
-        // turn nearest into an accidental no-op at an existing detent.
+        // Keep every movement control outside the scrollable documentation. This preserves a
+        // stable operation surface while the document itself participates in the component's
+        // default panel/inner-scroll handoff.
         let quickActions = UIView()
         quickActions.backgroundColor = DemoPalette.elevatedSurface
         quickActions.layer.cornerRadius = 16
         quickActions.translatesAutoresizingMaskIntoConstraints = false
-        let quickRow = UIStackView(arrangedSubviews: [
+        let targetRow = UIStackView(arrangedSubviews: [low, middle, high])
+        targetRow.axis = .horizontal
+        targetRow.distribution = .fillEqually
+        targetRow.spacing = 8
+        let optionRow = UIStackView(arrangedSubviews: [
             DemoControlFactory.caption("非吸附"),
             nonSnappingSwitch,
-            high,
-            nearest
+            nearest,
+            interruptButton
         ])
-        quickRow.axis = .horizontal
-        quickRow.alignment = .center
-        quickRow.spacing = 10
-        quickRow.translatesAutoresizingMaskIntoConstraints = false
-        let quickStack = UIStackView(arrangedSubviews: [quickRow, interruptButton])
+        optionRow.axis = .horizontal
+        optionRow.alignment = .center
+        optionRow.spacing = 8
+        let quickStack = UIStackView(arrangedSubviews: [styleControl, targetRow, optionRow])
         quickStack.axis = .vertical
         quickStack.spacing = 8
         quickStack.translatesAutoresizingMaskIntoConstraints = false
@@ -237,10 +505,7 @@ final class MovementLabViewController: DemoScenarioViewController {
         transactionCard.stackView.addArrangedSubview(resultLabel)
 
         let stack = UIStackView(
-            // Keep transaction and target controls near the visible top. Besides making the demo
-            // easier to operate, this guarantees that starting either action does not first scroll
-            // the independent controls view far enough to move the host to its maximum detent.
-            arrangedSubviews: [transactionCard, buttonsCard, rangeCard, styleCard, instructionsCard]
+            arrangedSubviews: [instructionsCard, styleCard, buttonsCard, rangeCard, transactionCard]
         )
         stack.axis = .vertical
         stack.spacing = 14
@@ -257,7 +522,7 @@ final class MovementLabViewController: DemoScenarioViewController {
             quickActions.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 18),
             quickActions.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -18),
             quickActions.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            quickActions.heightAnchor.constraint(equalToConstant: 120),
+            quickActions.heightAnchor.constraint(equalToConstant: 160),
 
             controlsScrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             controlsScrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
@@ -279,19 +544,6 @@ final class MovementLabViewController: DemoScenarioViewController {
         ])
     }
 
-    override func canCapture(_ scrollView: UIScrollView) -> Bool {
-        // This scroll view exists only to keep all controls reachable on compact screens. It is
-        // deliberately independent so it does not become part of the panel-handoff experiment.
-        scrollView !== controlsScrollView
-    }
-
-    override func gestureStrategy(
-        for gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> DemoGestureStrategy? {
-        otherGesture === controlsScrollView.panGestureRecognizer ? .otherFirst : nil
-    }
-
     private func movementButton(title: String, tag: Int) -> UIButton {
         let button = DemoControlFactory.button(title: title, tint: DemoPalette.purple)
         button.tag = tag
@@ -303,22 +555,6 @@ final class MovementLabViewController: DemoScenarioViewController {
         }
         button.addTarget(self, action: #selector(moveToDetent(_:)), for: .touchUpInside)
         return button
-    }
-
-    private func buttonGrid(_ buttons: [UIButton]) -> UIStackView {
-        let rows = stride(from: 0, to: buttons.count, by: 2).map { index -> UIStackView in
-            let end = min(index + 2, buttons.count)
-            return UIStackView(arrangedSubviews: Array(buttons[index..<end]))
-        }
-        rows.forEach {
-            $0.axis = .horizontal
-            $0.distribution = .fillEqually
-            $0.spacing = 9
-        }
-        let grid = UIStackView(arrangedSubviews: rows)
-        grid.axis = .vertical
-        grid.spacing = 9
-        return grid
     }
 
     private var selectedStyle: DemoMovementStyle {

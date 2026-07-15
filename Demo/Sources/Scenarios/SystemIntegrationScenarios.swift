@@ -144,7 +144,6 @@ final class ControlsAndGesturesViewController: DemoScenarioViewController,
     UICollectionViewDataSource {
 
     private let resultLabel = DemoControlFactory.valueLabel("等待控件事件")
-    private let gestureControl = UISegmentedControl(items: ["同时", "面板", "横滑", "系统"])
     private let accessibilityControl = UISegmentedControl(items: ["自动", "Panel", "接管"])
     private let pageScrollView = UIScrollView()
     private let carousel: UICollectionView
@@ -179,7 +178,6 @@ final class ControlsAndGesturesViewController: DemoScenarioViewController,
 
     override func transferComparisonSettings(to counterpart: DemoScenarioViewController) {
         guard let counterpart = counterpart as? ControlsAndGesturesViewController else { return }
-        counterpart.gestureControl.selectedSegmentIndex = gestureControl.selectedSegmentIndex
         counterpart.accessibilityControl.selectedSegmentIndex = accessibilityControl.selectedSegmentIndex
     }
 
@@ -218,13 +216,9 @@ final class ControlsAndGesturesViewController: DemoScenarioViewController,
 
         let carouselCard = DemoCardView(
             title: "功能与操作 · 横向 Carousel",
-            detail: "功能：对比纵向面板与横向 UICollectionView 的手势冲突策略。\n操作：选择策略后横向甩动色块，再斜向或纵向拖动，观察由哪一方取得手势。OC 使用原代理的整数策略，Swift 使用类型化策略；中立层表达一致，但系统仲裁时序可能不同。",
+            detail: "功能：验证不提供外部手势策略时，纵向面板与横向 UICollectionView 的默认交互。\n操作：横向甩动色块，再斜向或纵向拖动，观察组件默认捕获与 UIKit 仲裁结果。Demo 不覆盖任何手势冲突策略。",
             tint: DemoPalette.indigo
         )
-        gestureControl.selectedSegmentIndex = 0
-        gestureControl.accessibilityIdentifier = "controls.gesture"
-        gestureControl.addTarget(self, action: #selector(gesturePolicyChanged), for: .valueChanged)
-        carouselCard.stackView.addArrangedSubview(gestureControl)
         carousel.backgroundColor = .clear
         carousel.showsHorizontalScrollIndicator = false
         carousel.alwaysBounceHorizontal = true
@@ -289,22 +283,6 @@ final class ControlsAndGesturesViewController: DemoScenarioViewController,
         ])
     }
 
-    override func gestureStrategy(
-        for gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> DemoGestureStrategy? {
-        guard let gestureView = otherGesture.view,
-              gestureView === carousel || gestureView.isDescendant(of: carousel) else {
-            return nil
-        }
-        switch gestureControl.selectedSegmentIndex {
-        case 1: return .panelFirst
-        case 2: return .otherFirst
-        case 3: return .systemDefault
-        default: return .simultaneous
-        }
-    }
-
     override func accessibilityDisposition(
         for direction: UIAccessibilityScrollDirection
     ) -> DemoAccessibilityDisposition {
@@ -346,10 +324,6 @@ final class ControlsAndGesturesViewController: DemoScenarioViewController,
 
     @objc private func sliderChanged(_ sender: UISlider) {
         resultLabel.text = String(format: "Slider · %.0f", sender.value)
-    }
-
-    @objc private func gesturePolicyChanged() {
-        recordEvent("横向手势策略已切换")
     }
 
     @objc private func accessibilityButtonTapped(_ sender: UIButton) {

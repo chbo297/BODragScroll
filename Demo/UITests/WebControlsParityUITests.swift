@@ -8,14 +8,13 @@ final class WebControlsParityUITests: DemoUITestCase {
     }
 
     private struct CarouselObservation {
-        let strategy: String
         let visibleItems: [Int]
         let displayHeight: CGFloat
     }
 
     private struct ControlsObservation {
         let sliderValue: Int
-        let carousel: [CarouselObservation]
+        let carousel: CarouselObservation
     }
 
     private struct AccessibilityObservation {
@@ -94,7 +93,7 @@ final class WebControlsParityUITests: DemoUITestCase {
         }
     }
 
-    func testNativeControlsAndHorizontalGestureStrategiesMatchObjectiveC() {
+    func testNativeControlsAndDefaultHorizontalCarouselMatchObjectiveC() {
         let oc = observeControlsAndCarousel(.objectiveC)
         let swift = observeControlsAndCarousel(.swift)
 
@@ -105,26 +104,16 @@ final class WebControlsParityUITests: DemoUITestCase {
         XCTAssertLessThanOrEqual(abs(swift.sliderValue - oc.sliderValue), 1)
         XCTAssertTrue((70...90).contains(oc.sliderValue))
 
-        XCTAssertEqual(oc.carousel.count, 4)
-        XCTAssertEqual(swift.carousel.count, oc.carousel.count)
-        for (ocItem, swiftItem) in zip(oc.carousel, swift.carousel) {
-            XCTAssertEqual(swiftItem.strategy, ocItem.strategy)
-            XCTAssertEqual(
-                swiftItem.displayHeight,
-                ocItem.displayHeight,
-                accuracy: 2,
-                "Pure horizontal drag changed panel ownership for \(swiftItem.strategy)"
-            )
-            XCTAssertEqual(
-                swiftItem.visibleItems,
-                ocItem.visibleItems,
-                "Carousel result differs for strategy \(swiftItem.strategy)"
-            )
-            XCTAssertFalse(
-                swiftItem.visibleItems.isEmpty,
-                "Carousel accessibility state was unreadable for \(swiftItem.strategy)"
-            )
-        }
+        XCTAssertEqual(swift.carousel.displayHeight, oc.carousel.displayHeight, accuracy: 2)
+        XCTAssertEqual(
+            swift.carousel.visibleItems,
+            oc.carousel.visibleItems,
+            "Default carousel result differs"
+        )
+        XCTAssertFalse(
+            swift.carousel.visibleItems.isEmpty,
+            "Carousel accessibility state was unreadable"
+        )
     }
 
     func testAccessibilityOwnershipModesMatchObjectiveC() {
@@ -210,31 +199,22 @@ final class WebControlsParityUITests: DemoUITestCase {
             "Could not parse slider result for \(implementation.rawValue): \(sliderResult)"
         )
 
-        _ = scrollToElement("controls.gesture", in: "controlsPageScroll")
-        let carousel = requireElement("controls.carousel")
-        let strategies = ["同时", "面板", "横滑", "系统"]
-        var observations: [CarouselObservation] = []
-        for strategy in strategies {
-            _ = selectSegment(control: "controls.gesture", label: strategy)
-            swipe(
-                carousel,
-                from: CGVector(dx: 0.84, dy: 0.5),
-                to: CGVector(dx: 0.16, dy: 0.5),
-                velocity: .slow
-            )
-            Thread.sleep(forTimeInterval: 0.35)
-            let height = waitForStableDisplayHeight()
-            XCTAssertEqual(height, maximum, accuracy: 2)
-            observations.append(
-                CarouselObservation(
-                    strategy: strategy,
-                    visibleItems: visibleCarouselItems(in: carousel),
-                    displayHeight: height
-                )
-            )
-        }
+        let carousel = scrollToElement("controls.carousel", in: "controlsPageScroll")
+        swipe(
+            carousel,
+            from: CGVector(dx: 0.84, dy: 0.5),
+            to: CGVector(dx: 0.16, dy: 0.5),
+            velocity: .slow
+        )
+        Thread.sleep(forTimeInterval: 0.35)
+        let height = waitForStableDisplayHeight()
+        XCTAssertEqual(height, maximum, accuracy: 2)
+        let observation = CarouselObservation(
+            visibleItems: visibleCarouselItems(in: carousel),
+            displayHeight: height
+        )
         attachScreenshot("controls-carousel-\(implementation.rawValue)", keepAlways: true)
-        return ControlsObservation(sliderValue: sliderValue ?? -1, carousel: observations)
+        return ControlsObservation(sliderValue: sliderValue ?? -1, carousel: observation)
     }
 
     private func observeAccessibilityMode(

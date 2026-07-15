@@ -82,6 +82,97 @@ static CGFloat sf_getOnePxiel(void) {
     return onepxiel;
 }
 
+#if DEBUG
+static void BODragScrollDebugLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static void BODragScrollDebugLog(NSString *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    NSString *body = [[NSString alloc] initWithFormat:format arguments:arguments];
+    va_end(arguments);
+
+    static dispatch_queue_t outputQueue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        outputQueue = dispatch_queue_create("com.chbo297.BODragScrollDemo.oc-diagnostics",
+                                            DISPATCH_QUEUE_SERIAL);
+    });
+    dispatch_async(outputQueue, ^{
+        NSLog(@"~~~[OC] %@", body);
+    });
+}
+
+#define BODS_DEBUG_LOG(format, ...) BODragScrollDebugLog((format), ##__VA_ARGS__)
+
+static NSString *BODragScrollDebugNumberArrayDescription(NSArray<NSNumber *> *values) {
+    if (values.count == 0) {
+        return @"none";
+    }
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:values.count];
+    for (NSNumber *value in values) {
+        [parts addObject:[NSString stringWithFormat:@"%.2f", value.doubleValue]];
+    }
+    return [parts componentsJoinedByString:@"→"];
+}
+
+static NSString *BODragScrollDebugViewDescription(UIView *view) {
+    if (!view) {
+        return @"nil";
+    }
+
+    NSString *identifier = view.accessibilityIdentifier.length > 0 ? view.accessibilityIdentifier : @"-";
+    if ([view isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *scrollView = (UIScrollView *)view;
+        UIEdgeInsets inset = sf_common_contentInset(scrollView);
+        CGFloat minOffsetY = -inset.top;
+        CGFloat maxOffsetY = MAX(minOffsetY,
+                                 scrollView.contentSize.height + inset.bottom - CGRectGetHeight(scrollView.bounds));
+        return [NSString stringWithFormat:
+                @"%@<%p>{id=%@ frame=%@ bounds=%@ offset=%@ contentSize=%@ inset=%@ verticalRange=%.2f→%.2f}",
+                NSStringFromClass(view.class),
+                (void *)view,
+                identifier,
+                NSStringFromCGRect(view.frame),
+                NSStringFromCGRect(view.bounds),
+                NSStringFromCGPoint(scrollView.contentOffset),
+                NSStringFromCGSize(scrollView.contentSize),
+                NSStringFromUIEdgeInsets(inset),
+                minOffsetY,
+                maxOffsetY];
+    }
+
+    return [NSString stringWithFormat:@"%@<%p>{id=%@ frame=%@}",
+            NSStringFromClass(view.class),
+            (void *)view,
+            identifier,
+            NSStringFromCGRect(view.frame)];
+}
+
+static NSString *BODragScrollDebugPriorityDescription(NSInteger priority) {
+    switch (priority) {
+        case -1:
+            return @"-1(current/panel-first)";
+        case 0:
+            return @"0(simultaneous)";
+        case 1:
+            return @"1(other-scroll-first)";
+        case 2:
+            return @"2(system-default)";
+        case 3:
+            return @"3(coordinated-participant)";
+        default:
+            return @"not-applicable";
+    }
+}
+
+static UIScrollView *BODragScrollDebugScrollViewForPanGesture(UIGestureRecognizer *gestureRecognizer) {
+    if (![gestureRecognizer.view isKindOfClass:[UIScrollView class]]) {
+        return nil;
+    }
+    UIScrollView *scrollView = (UIScrollView *)gestureRecognizer.view;
+    return gestureRecognizer == scrollView.panGestureRecognizer ? scrollView : nil;
+}
+#endif
+
 static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
     Method originalMethod = class_getInstanceMethod(cls, originalSelector);
     Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
@@ -352,6 +443,15 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     BOOL _needsRecoverScrollVAllowScrollToTop;
     
     BOOL _didTouchWebView;
+
+#if DEBUG
+    NSUInteger _boDebugTouchSequence;
+    BOOL _boDebugCollectingTouchCapture;
+    NSMutableArray<NSDictionary *> *_boDebugCaptureCandidates;
+    NSString *_boDebugCaptureBypassReason;
+    BOOL _boDebugHasOwnerState;
+    BOOL _boDebugLastOwnerWasInner;
+#endif
 }
 
 //在设置前后添加标识位，其它方法接收到滑动发生时，可根据标识位识别是否是此处设置导致。
@@ -554,11 +654,40 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     NSInteger hierarchy = 0;
     
     UIView *thewebview = nil;
+
+#if DEBUG
+    NSInteger boDebugResponderDepth = 0;
+#endif
     
     while (resp) {
         if (self == resp) {
             break;
         }
+
+#if DEBUG
+        if (_boDebugCollectingTouchCapture &&
+            [resp isKindOfClass:[UIScrollView class]] &&
+            ![(UIScrollView *)resp isScrollEnabled]) {
+            UIScrollView *disabledScrollView = (UIScrollView *)resp;
+            UIEdgeInsets disabledInset = sf_common_contentInset(disabledScrollView);
+            BOOL disabledVertical =
+            (disabledScrollView.contentSize.height + disabledInset.top + disabledInset.bottom) >
+            CGRectGetHeight(disabledScrollView.bounds);
+            BOOL disabledHorizontal =
+            (disabledScrollView.contentSize.width + disabledInset.left + disabledInset.right) >
+            CGRectGetWidth(disabledScrollView.bounds);
+            [_boDebugCaptureCandidates addObject:@{
+                @"scrollView": disabledScrollView,
+                @"responderDepth": @(boDebugResponderDepth),
+                @"hierarchy": @(NSNotFound),
+                @"enabled": @NO,
+                @"canCapture": @NO,
+                @"vertical": @(disabledVertical),
+                @"horizontal": @(disabledHorizontal),
+                @"initialPriority": @(NSNotFound)
+            }];
+        }
+#endif
         
         if ([resp isKindOfClass:[UIScrollView class]] && [(UIScrollView *)resp isScrollEnabled]) {
             UIScrollView *scv = (UIScrollView *)resp;
@@ -612,6 +741,26 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                 //不处理捕获
                 priority = 2;
             }
+
+#if DEBUG
+            if (_boDebugCollectingTouchCapture) {
+                UIEdgeInsets debugInset = sf_common_contentInset(scv);
+                BOOL canScrollVertical =
+                (scv.contentSize.height + debugInset.top + debugInset.bottom) > CGRectGetHeight(scv.bounds);
+                BOOL canScrollHorizontal =
+                (scv.contentSize.width + debugInset.left + debugInset.right) > CGRectGetWidth(scv.bounds);
+                [_boDebugCaptureCandidates addObject:@{
+                    @"scrollView": scv,
+                    @"responderDepth": @(boDebugResponderDepth),
+                    @"hierarchy": @(hierarchy),
+                    @"enabled": @YES,
+                    @"canCapture": @(scvalid),
+                    @"vertical": @(canScrollVertical),
+                    @"horizontal": @(canScrollHorizontal),
+                    @"initialPriority": @(priority)
+                }];
+            }
+#endif
             
             if (scdic) {
                 [scdic setObject:@(priority) forKey:@"priority"];
@@ -626,6 +775,10 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
             && [resp isKindOfClass:[UIView class]]) {
             thewebview = (id)resp;
         }
+
+#if DEBUG
+        boDebugResponderDepth += 1;
+#endif
         
         resp = resp.nextResponder;
     }
@@ -660,9 +813,132 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     return selsc;
 }
 
+#if DEBUG
+- (void)__bo_debugLogCaptureForTouches:(NSSet<UITouch *> *)touches
+                           touchedView:(UIView *)view
+                               webView:(UIView *)webView {
+    UITouch *touch = touches.anyObject;
+    CGPoint location = touch ? [touch locationInView:self] : CGPointZero;
+    BODS_DEBUG_LOG(@"[Touch#%lu][Begin] location=%@ touchedView=%@ webView=%@ candidateCount=%lu",
+                   (unsigned long)_boDebugTouchSequence,
+                   NSStringFromCGPoint(location),
+                   BODragScrollDebugViewDescription(view),
+                   BODragScrollDebugViewDescription(webView),
+                   (unsigned long)_boDebugCaptureCandidates.count);
+
+    __block BOOL currentWasFoundInResponderChain = NO;
+    [_boDebugCaptureCandidates enumerateObjectsUsingBlock:
+     ^(NSDictionary *candidate, NSUInteger idx, BOOL *stop) {
+        UIScrollView *scrollView = candidate[@"scrollView"];
+        BOOL selected = scrollView == self->_currentScrollView;
+        currentWasFoundInResponderChain = currentWasFoundInResponderChain || selected;
+
+        NSInteger initialPriority = [candidate[@"initialPriority"] integerValue];
+        NSInteger finalPriority = initialPriority;
+        NSNumber *adjustedPriority =
+        [self->_innerSVBehaviorInfo objectForKey:[NSString stringWithFormat:@"%p", scrollView]];
+        if (!selected && [adjustedPriority isKindOfClass:[NSNumber class]]) {
+            finalPriority = adjustedPriority.integerValue;
+        }
+        NSString *finalPriorityDescription = selected
+        ? @"captured-current(priority only applies to other scroll views)"
+        : BODragScrollDebugPriorityDescription(finalPriority);
+
+        NSNumber *hierarchy = candidate[@"hierarchy"];
+        NSString *hierarchyText = hierarchy.integerValue == NSNotFound ? @"disabled" : hierarchy.stringValue;
+        BODS_DEBUG_LOG(@"[Touch#%lu][CaptureCandidate#%lu] responderDepth=%@ hierarchy=%@ enabled=%@ canCapture=%@ vertical=%@ horizontal=%@ selectedAsCurrent=%@ initialPriority=%@ finalPriority=%@ scrollView=%@",
+                       (unsigned long)self->_boDebugTouchSequence,
+                       (unsigned long)idx,
+                       candidate[@"responderDepth"],
+                       hierarchyText,
+                       [candidate[@"enabled"] boolValue] ? @"YES" : @"NO",
+                       [candidate[@"canCapture"] boolValue] ? @"YES" : @"NO",
+                       [candidate[@"vertical"] boolValue] ? @"YES" : @"NO",
+                       [candidate[@"horizontal"] boolValue] ? @"YES" : @"NO",
+                       selected ? @"YES" : @"NO",
+                       BODragScrollDebugPriorityDescription(initialPriority),
+                       finalPriorityDescription,
+                       BODragScrollDebugViewDescription(scrollView));
+    }];
+
+    BOOL storedModelAvailable = _innerSVAttInfCount > 0;
+    BOOL modelEstablishedOrRefreshedForTouch = storedModelAvailable && !_boDebugCaptureBypassReason;
+    NSString *mode;
+    if (_boDebugCaptureBypassReason) {
+        mode = _boDebugCaptureBypassReason;
+    } else if (self.innerScrollViewFirst) {
+        mode = @"inner-first(native-inner owns gesture)";
+    } else if (self.innerScrollViewFirstButCanDrag) {
+        mode = @"inner-first-at-boundary(native-inner when it can scroll; panel at boundary)";
+    } else if (modelEstablishedOrRefreshedForTouch) {
+        mode = @"coordinated-scroll";
+    } else if (_currentScrollView) {
+        mode = @"panel-only(captured inner exists but no coordinated model)";
+    } else {
+        mode = @"panel-only(no captured inner)";
+    }
+
+    BODS_DEBUG_LOG(@"[Touch#%lu][CaptureResult] currentScrollView=%@ currentFromThisResponderChain=%@ storedCoordinationModelAvailable=%@ strictRule=(innerSVAttInfCount>0) modelEstablishedOrRefreshedForThisTouch=%@ captureBypassReason=%@ detentHeights=%@ attachSegmentCount=%ld mode=%@",
+                   (unsigned long)_boDebugTouchSequence,
+                   BODragScrollDebugViewDescription(_currentScrollView),
+                   currentWasFoundInResponderChain ? @"YES" : @"NO",
+                   storedModelAvailable ? @"YES" : @"NO",
+                   modelEstablishedOrRefreshedForTouch ? @"YES" : @"NO",
+                   _boDebugCaptureBypassReason ? : @"none",
+                   BODragScrollDebugNumberArrayDescription(self.attachDisplayHAr),
+                   (long)_innerSVAttInfCount,
+                   mode);
+
+    if (storedModelAvailable && !modelEstablishedOrRefreshedForTouch) {
+        BODS_DEBUG_LOG(@"[Touch#%lu][RetainedModelAfterCaptureBypass] reason=%@ storedAttachSegmentCount=%ld modelCameFromPreviousTouch=YES mayStillDriveIfHostPanBegins=YES verifyWithShouldBeginAndOwnerTransition=YES",
+                       (unsigned long)_boDebugTouchSequence,
+                       _boDebugCaptureBypassReason ? : @"current-touch-did-not-refresh-model",
+                       (long)_innerSVAttInfCount);
+    }
+
+    for (NSInteger infoIndex = 0; infoIndex < _innerSVAttInfCount; infoIndex++) {
+        BODragScrollAttachInfo info = _innerSVAttInfAr[infoIndex];
+        UIScrollView *participant = [self __obtainScrollViewWithIdx:info.scrollViewIdx];
+        NSString *role;
+        if (info.scrollViewIdx == -1) {
+            role = @"primary-current";
+        } else if (info.scrollViewIdx > 0) {
+            role = @"captured-ancestor";
+        } else {
+            role = @"none/panel";
+        }
+        NSString *innerActivation = info.dragInner
+        ? [NSString stringWithFormat:@"panelHeight=%.2f", info.displayH]
+        : @"disabled";
+        BODS_DEBUG_LOG(@"[Touch#%lu][ModelSegment#%ld] modelOrigin=%@ scrollViewIdx=%ld role=%@ participant=%@ panelHeight(displayH)=%.2f hostOffset=%.2f→%.2f dragInner=%@ innerOffset=%.2f→%.2f innerScrollActivation=%@",
+                       (unsigned long)_boDebugTouchSequence,
+                       (long)infoIndex,
+                       modelEstablishedOrRefreshedForTouch ? @"current-touch" : @"previous-touch-retained",
+                       (long)info.scrollViewIdx,
+                       role,
+                       BODragScrollDebugViewDescription(participant),
+                       info.displayH,
+                       info.dragSVOffsetY,
+                       info.dragSVOffsetY2,
+                       info.dragInner ? @"YES" : @"NO",
+                       info.innerOffsetA,
+                       info.innerOffsetB,
+                       innerActivation);
+    }
+}
+#endif
+
 - (BOOL)touchesShouldBegin:(NSSet<UITouch *> *)touches
                  withEvent:(UIEvent *)event
              inContentView:(UIView *)view {
+
+#if DEBUG
+    _boDebugTouchSequence += 1;
+    _boDebugCollectingTouchCapture = YES;
+    _boDebugCaptureCandidates = [NSMutableArray array];
+    _boDebugCaptureBypassReason = nil;
+    _boDebugHasOwnerState = NO;
+#endif
     
     if (_lastScrollIsInner &&
         _currentScrollView &&
@@ -677,8 +953,19 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     NSDictionary *setinfo = [self trySetupCurrentScrollViewWithContentView:view];
     UIView *thewebview = [setinfo objectForKey:@"webView"];
     _didTouchWebView = (nil != thewebview);
-    
-    return [super touchesShouldBegin:touches withEvent:event inContentView:view];
+#if DEBUG
+    _boDebugCollectingTouchCapture = NO;
+    [self __bo_debugLogCaptureForTouches:touches touchedView:view webView:thewebview];
+    _boDebugCaptureCandidates = nil;
+#endif
+    BOOL shouldBegin = [super touchesShouldBegin:touches withEvent:event inContentView:view];
+#if DEBUG
+    BODS_DEBUG_LOG(@"[Touch#%lu][touchesShouldBegin] result=%@ semantic=%@",
+                   (unsigned long)_boDebugTouchSequence,
+                   shouldBegin ? @"YES" : @"NO",
+                   shouldBegin ? @"content touch may begin" : @"content touch rejected by UIScrollView");
+#endif
+    return shouldBegin;
 }
 
 - (NSDictionary *)trySetupCurrentScrollViewWithContentView:(UIView *)view {
@@ -694,6 +981,11 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
         [retdic setObject:thewebview forKey:@"webView"];
         
         if (self.inhibitPanelForWebView) {
+#if DEBUG
+            if (_boDebugCollectingTouchCapture) {
+                _boDebugCaptureBypassReason = @"web-native(panel-inhibited)";
+            }
+#endif
             return retdic;
         }
         
@@ -709,6 +1001,11 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                      judgeInnerSVBehaviorInfo:NO];
         if (nestscar.count >= 2) {
             //设置了ignoreWebMulInnerScroll，且发现web内有多层嵌套了，不捕获，不干涉，返回即可
+#if DEBUG
+            if (_boDebugCollectingTouchCapture) {
+                _boDebugCaptureBypassReason = @"capture-bypassed(multiple-web-scroll-views;UIKit-arbitrates)";
+            }
+#endif
             return retdic;
         }
     }
@@ -1710,6 +2007,8 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     
                 } else {
                     //没有指定吸附点
+                    //无吸附点只表示面板连续移动，不表示禁用内外联动，仍需生成默认内部滑动区间
+                    needsaddoneinnerscroll = YES;
                     
                     if (self.prefDragInnerScroll) {
                         //默认从当前开始滑动
@@ -2650,6 +2949,11 @@ static void *sf_observe_context = "sf_observe_context";
         return;
     }
     BOOL isinnersc = NO;
+#if DEBUG
+    // Assigned by the same branch that selects `isinnersc`; never infer the owner again from
+    // overlapping one-pixel model ranges in the logger.
+    UIScrollView *boDebugActiveParticipant = nil;
+#endif
     CGFloat innertotalsc = _totalScrollInnerOSy;
     BOOL triggerinner = NO;
     //暂时不用这个属性，后续有需求可能会用
@@ -2689,6 +2993,9 @@ static void *sf_observe_context = "sf_observe_context";
                     embedf.origin.y = -topext;
                     
                     isinnersc = YES;
+#if DEBUG
+                    boDebugActiveParticipant = _currentScrollView;
+#endif
                 } else {
                     //内部不支持bounces
                     CGPoint co = self.contentOffset;
@@ -2767,6 +3074,11 @@ static void *sf_observe_context = "sf_observe_context";
                         }
                         //exty是0的话，标识已经到外部了
                         isinnersc = (exty > 0);
+#if DEBUG
+                        if (isinnersc) {
+                            boDebugActiveParticipant = theinfosv;
+                        }
+#endif
                     }
                     embedf.origin.y = cursclength;
                     findtheinfo = YES;
@@ -2807,6 +3119,9 @@ static void *sf_observe_context = "sf_observe_context";
                     innershouldosy = innermaxosy + bottomext;
                     
                     isinnersc = YES;
+#if DEBUG
+                    boDebugActiveParticipant = _currentScrollView;
+#endif
                 } else {
                     //内部不支持bounces
                     CGPoint co = self.contentOffset;
@@ -2883,6 +3198,36 @@ static void *sf_observe_context = "sf_observe_context";
     }
     
     CGFloat newdh = CGRectGetHeight(self.bounds) - (CGRectGetMinY(_embedView.frame) - self.contentOffset.y);
+
+#if DEBUG
+    if (_boDebugTouchSequence > 0 &&
+        (!_boDebugHasOwnerState || _boDebugLastOwnerWasInner != isinnersc)) {
+        NSString *previousOwner = !_boDebugHasOwnerState
+        ? @"none"
+        : (_boDebugLastOwnerWasInner ? @"inner" : @"panel");
+        NSString *newOwner = isinnersc ? @"inner" : @"panel";
+        NSString *motionKind;
+        if (self.bods_isTracking || self.isDragging) {
+            motionKind = @"touch";
+        } else if (self.bods_isDecelerating) {
+            motionKind = @"deceleration";
+        } else if (self.isScrollAnimating) {
+            motionKind = @"programmatic-animation";
+        } else {
+            motionKind = @"programmatic-or-layout";
+        }
+        BODS_DEBUG_LOG(@"[Touch#%lu][OwnerTransition] %@→%@ displayHeight=%.2f hostOffsetY=%.2f motionKind=%@ activeParticipant=%@",
+                       (unsigned long)_boDebugTouchSequence,
+                       previousOwner,
+                       newOwner,
+                       newdh,
+                       self.contentOffset.y,
+                       motionKind,
+                       BODragScrollDebugViewDescription(boDebugActiveParticipant));
+        _boDebugHasOwnerState = YES;
+        _boDebugLastOwnerWasInner = isinnersc;
+    }
+#endif
     
     //滑动外部时使用DecelerationRateFast
     if (scrollView.bods_isTracking) {
@@ -3078,6 +3423,22 @@ static void *sf_observe_context = "sf_observe_context";
     }
     
     return 0;
+}
+
+/*
+ 根据联动模型将BODragScrollView的offset.y投影为面板展示高度。
+ 无吸附点时系统的targetContentOffset需要原样保留，但内部滑动消耗的距离
+ 不能重复计入面板展示高度。
+ */
+- (CGFloat)__displayHForDragOffsetY:(CGFloat)dragOffsetY {
+    CGFloat consumedInnerDistance = 0;
+    for (NSInteger idx = 0; idx < _innerSVAttInfCount; idx++) {
+        BODragScrollAttachInfo info = _innerSVAttInfAr[idx];
+        CGFloat segmentLength = MAX(info.innerOffsetB - info.innerOffsetA, 0);
+        CGFloat segmentProgress = MIN(MAX(dragOffsetY - info.dragSVOffsetY, 0), segmentLength);
+        consumedInnerDistance += segmentProgress;
+    }
+    return CGRectGetHeight(self.bounds) + dragOffsetY - consumedInnerDistance;
 }
 
 /*
@@ -3508,7 +3869,7 @@ static void *sf_observe_context = "sf_observe_context";
                      withVelocity:(CGPoint)velocity
               targetContentOffset:(inout CGPoint *)targetContentOffset {
     
-    BODragScrollAttachInfo theinfo;
+    BODragScrollAttachInfo theinfo = {0};
     NSInteger scrolltype =\
     [self __scrollViewWillEndDragging:scrollView
                          withVelocity:velocity
@@ -3523,7 +3884,7 @@ static void *sf_observe_context = "sf_observe_context";
     
     CGFloat dragoutdy = (*targetContentOffset).y;
     CGFloat newdh;
-    if (_innerSVAttInfCount > 0) {
+    if (0 != scrolltype && _innerSVAttInfCount > 0) {
         if (dragoutdy < theinfo.dragSVOffsetY) {
             newdh = theinfo.displayH - theinfo.dragSVOffsetY + dragoutdy;
         } else if (dragoutdy <= theinfo.dragSVOffsetY2) {
@@ -3532,7 +3893,7 @@ static void *sf_observe_context = "sf_observe_context";
             newdh = theinfo.displayH + dragoutdy - theinfo.dragSVOffsetY2;
         }
     } else {
-        newdh = CGRectGetHeight(self.bounds) + dragoutdy;
+        newdh = [self __displayHForDragOffsetY:dragoutdy];
     }
     
     BOOL willdecelerate =\
@@ -3816,9 +4177,14 @@ static void *sf_observe_context = "sf_observe_context";
 
 #pragma mark - gesture
 
+
+/*
+ YES:  对方优先
+ NO:  己方优先
+ */
 //不实现该方法，默认NO即可
 //当gestureRecognizer遇到otherGestureRecognizer，是否希望将gestureRecognizer失效
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+- (BOOL)__bo_resultForGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
 shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         return NO;
@@ -3886,8 +4252,36 @@ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecog
     }
 }
 
-//当gestureRecognizer遇到otherGestureRecognizer，是否希望将otherGestureRecognizer失效
+/*
+ YES:  对方优先
+ NO:  己方优先
+ */
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    BOOL result = [self __bo_resultForGestureRecognizer:gestureRecognizer
+             shouldRequireFailureOfGestureRecognizer:otherGestureRecognizer];
+#if DEBUG
+    UIScrollView *otherScrollView = BODragScrollDebugScrollViewForPanGesture(otherGestureRecognizer);
+    if (gestureRecognizer == self.panGestureRecognizer &&
+        otherScrollView &&
+        otherScrollView != self) {
+        NSString *semantic = result
+        ? @"other-first: 当前pan等待对方pan失败"
+        : @"no-other-first-dependency: 未建立对方优先依赖（不能据此推断当前优先）";
+        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldRequireFailureOf] result=%@ semantic=%@ otherIsCurrentCaptured=%@ storedCapturePriority=%@ other=%@",
+                       (unsigned long)_boDebugTouchSequence,
+                       result ? @"YES" : @"NO",
+                       semantic,
+                       otherScrollView == _currentScrollView ? @"YES" : @"NO",
+                       BODragScrollDebugPriorityDescription([self __priorityBehaviorForInnerSV:otherScrollView]),
+                       BODragScrollDebugViewDescription(otherScrollView));
+    }
+#endif
+    return result;
+}
+
+//当gestureRecognizer遇到otherGestureRecognizer，是否希望将otherGestureRecognizer失效
+- (BOOL)__bo_resultForGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
 shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         return NO;
@@ -3961,6 +4355,35 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
     }
 }
 
+
+/*
+ YES:  几方优先
+ NO:  对方
+ */
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    BOOL result = [self __bo_resultForGestureRecognizer:gestureRecognizer
+          shouldBeRequiredToFailByGestureRecognizer:otherGestureRecognizer];
+#if DEBUG
+    UIScrollView *otherScrollView = BODragScrollDebugScrollViewForPanGesture(otherGestureRecognizer);
+    if (gestureRecognizer == self.panGestureRecognizer &&
+        otherScrollView &&
+        otherScrollView != self) {
+        NSString *semantic = result
+        ? @"current-first: 对方pan等待当前pan失败"
+        : @"no-current-first-dependency: 未建立当前优先依赖（不能据此推断对方优先）";
+        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldBeRequiredToFailBy] result=%@ semantic=%@ otherIsCurrentCaptured=%@ storedCapturePriority=%@ other=%@",
+                       (unsigned long)_boDebugTouchSequence,
+                       result ? @"YES" : @"NO",
+                       semantic,
+                       otherScrollView == _currentScrollView ? @"YES" : @"NO",
+                       BODragScrollDebugPriorityDescription([self __priorityBehaviorForInnerSV:otherScrollView]),
+                       BODragScrollDebugViewDescription(otherScrollView));
+    }
+#endif
+    return result;
+}
+
 /*
  不实现该方法，则默认与任何手势不共存
  若希望本组件与某些UIPanGestureRecognizer共存，使其不影响本组件的滑动效果:
@@ -3968,7 +4391,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
  2.在上面的shouldBeRequiredToFail做对应处理
  3.再考虑怎么设计才能可配置且通用
  */
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+- (BOOL)__bo_resultForGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         return YES;
     } else if (gestureRecognizer.view == self) {
@@ -4065,7 +4488,30 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
     }
 }
 
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    BOOL result = [self __bo_resultForGestureRecognizer:gestureRecognizer
+              shouldRecognizeSimultaneouslyWithGestureRecognizer:otherGestureRecognizer];
+#if DEBUG
+    UIScrollView *otherScrollView = BODragScrollDebugScrollViewForPanGesture(otherGestureRecognizer);
+    if (gestureRecognizer == self.panGestureRecognizer &&
+        otherScrollView &&
+        otherScrollView != self) {
+        NSString *semantic = result
+        ? @"simultaneous: 当前pan与对方pan可同时识别"
+        : @"not-simultaneous: 不同时识别，最终优先级由失败依赖或系统决定";
+        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldRecognizeSimultaneouslyWith] result=%@ semantic=%@ otherIsCurrentCaptured=%@ storedCapturePriority=%@ other=%@",
+                       (unsigned long)_boDebugTouchSequence,
+                       result ? @"YES" : @"NO",
+                       semantic,
+                       otherScrollView == _currentScrollView ? @"YES" : @"NO",
+                       BODragScrollDebugPriorityDescription([self __priorityBehaviorForInnerSV:otherScrollView]),
+                       BODragScrollDebugViewDescription(otherScrollView));
+    }
+#endif
+    return result;
+}
+
+- (BOOL)__bo_resultForGestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         if (_lastAniScrollEndTS > 0 &&
             [NSDate date].timeIntervalSince1970 - _lastAniScrollEndTS < 0.1) {
@@ -4103,6 +4549,48 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
     }
     
     return YES;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    BOOL result = [self __bo_resultForGestureRecognizerShouldBegin:gestureRecognizer];
+#if DEBUG
+    if (gestureRecognizer == self.panGestureRecognizer) {
+        BOOL storedModelAvailable = _innerSVAttInfCount > 0;
+        BOOL modelEstablishedOrRefreshedForTouch = storedModelAvailable && !_boDebugCaptureBypassReason;
+        NSString *provisionalDriver;
+        if (result) {
+            if (storedModelAvailable && _boDebugCaptureBypassReason) {
+                provisionalDriver = @"retained-coordinated-model-after-capture-bypass(verify actual owner transition)";
+            } else if (modelEstablishedOrRefreshedForTouch) {
+                provisionalDriver = @"coordinated-scroll(current panel pan may drive panel/inner model)";
+            } else if (self.innerScrollViewFirstButCanDrag && _currentScrollView) {
+                provisionalDriver = @"panel-self(inner reached boundary)";
+            } else {
+                provisionalDriver = @"panel-self(no coordinated model)";
+            }
+        } else if (self.inhibitPanelForWebView && _didTouchWebView) {
+            provisionalDriver = @"web/native-scroll(panel inhibited)";
+        } else if (_currentScrollView && self.innerScrollViewFirst) {
+            provisionalDriver = @"native-inner(inner-first)";
+        } else if (_currentScrollView && self.innerScrollViewFirstButCanDrag) {
+            provisionalDriver = @"native-inner(inner can scroll; panel waits for boundary)";
+        } else {
+            provisionalDriver = @"current-pan-rejected(other recognizer/system decides)";
+        }
+        CGFloat velocityY = [self.panGestureRecognizer velocityInView:self.window].y;
+        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldBegin] result=%@ semantic=%@ provisionalDriver=%@ velocityY=%.2f storedCoordinationModelAvailable=%@ modelEstablishedOrRefreshedForThisTouch=%@ captureBypassReason=%@ currentScrollView=%@",
+                       (unsigned long)_boDebugTouchSequence,
+                       result ? @"YES" : @"NO",
+                       result ? @"当前dragScrollView pan允许开始" : @"当前dragScrollView pan拒绝开始",
+                       provisionalDriver,
+                       velocityY,
+                       storedModelAvailable ? @"YES" : @"NO",
+                       modelEstablishedOrRefreshedForTouch ? @"YES" : @"NO",
+                       _boDebugCaptureBypassReason ? : @"none",
+                       BODragScrollDebugViewDescription(_currentScrollView));
+    }
+#endif
+    return result;
 }
 
 /*

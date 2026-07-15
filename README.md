@@ -27,7 +27,9 @@ pod "BODragScroll"
 
 用 Xcode 打开 `Demo/BODragScrollDemo.xcodeproj`。目录提供 9 个场景，覆盖自由面板、吸附与程序化移动、默认智能交接边界、列表交接、多层滚动链、显式内部区间、策略与回弹、WebKit、UIControl、横向手势和辅助功能。
 
-每个功能页右上角都可通过 OC / Swift 分段标签在 Swift 重写版与原 Objective-C 实现之间重建切换；业务选项会保留，展示高度、内容 offset、捕获会话和运行中的动画会重置，便于从同一初始状态重复 A/B。Demo 中的 OC `.h/.m` 是源仓库原文件的逐字节副本，只通过独立临时 Framework 和中立适配层接入；原实现的 `+load` swizzle 仍是进程级行为，因此这里用于功能对齐，不代表两个完全隔离进程的性能对照。
+每个功能页右上角都可通过 OC / Swift 分段标签在 Swift 重写版与原 Objective-C 实现之间重建切换；业务选项会保留，展示高度、内容 offset、捕获会话和运行中的动画会重置，便于从同一初始状态重复 A/B。Demo 中的 OC `.h/.m` 以源仓库实现为逻辑基线，并额外加入以 `~~~` 开头的诊断日志；功能修复会按语义同步，但不会用源文件整体覆盖这些日志。原实现的 `+load` swizzle 仍是进程级行为，因此这里用于功能对齐，不代表两个完全隔离进程的性能对照。
+
+Swift 内部实现的推荐阅读顺序、组合滚动数学模型和 UIKit 生命周期见 [docs/README.md](docs/README.md)。
 
 ## 基本使用
 
@@ -169,7 +171,7 @@ Objective-C 原实现通过 method swizzling，使被捕获内部 scroll view �
 
 ## 文件结构与边界
 
-生产代码固定为九个 Swift 文件：
+生产实现由九个运行文件和一个仅在 DEBUG 编译的诊断文件组成：
 
 | 文件 | 职责 |
 | --- | --- |
@@ -182,6 +184,7 @@ Objective-C 原实现通过 method swizzling，使被捕获内部 scroll view �
 | `BODragScrollScrolling.swift` | 高频 didScroll 投影、回弹分配、错位恢复和指示器 |
 | `BODragScrollTransition.swift` | 移动 transaction、动画、拖拽/减速生命周期和 scroll-to-top |
 | `BODragScrollInteraction.swift` | 命中测试、手势优先级、系统触摸补完和 accessibility |
+| `BODragScrollDiagnostics.swift` | DEBUG Demo 观察事件；不参与捕获、手势或滚动决策 |
 
 划分以“状态所有权 + 系统回调阶段”为边界，不再把一个 Objective-C `.m` 文件机械拆成大量微型 helper 文件；纯计算仅有两个 Core 文件，UIKit 生命周期仍围绕一个 `BODragScrollView` 聚合。
 
@@ -211,7 +214,7 @@ xcodebuild -scheme BODragScroll \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 ```
 
-当前验证包含 41 条纯 Swift 数学/模型/求解器测试和 101 条 iOS UIKit 集成测试，覆盖 Float32 语义、物理像素判定带、嵌套三层片段顺序、同一祖先的非连续区间、目标求解阈值、完成回调一次性、首次布局移动、响应链捕获与跨容器接管、Web 单候选 provider 回调、投影写入顺序、状态恢复、重入/析构生命周期和 accessibility。
+当前验证包含 41 条纯 Swift 数学/模型/求解器测试和 70 条 iOS UIKit 集成测试，覆盖 Float32 与原生 CGFloat 来源语义、物理像素判定带、无吸附点联动、嵌套三层片段顺序、同一祖先的非连续区间、目标求解阈值、完成回调一次性、首次布局移动、响应链捕获与跨容器接管、Web 单候选 provider 回调、投影写入顺序、状态恢复、重入/析构生命周期和 accessibility。
 
 ## License
 

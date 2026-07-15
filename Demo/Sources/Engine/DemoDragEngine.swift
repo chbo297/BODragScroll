@@ -137,13 +137,6 @@ struct DemoCaptureProposal {
     }
 }
 
-enum DemoGestureStrategy {
-    case simultaneous
-    case panelFirst
-    case otherFirst
-    case systemDefault
-}
-
 enum DemoAccessibilityDisposition {
     case automatic
     case handled
@@ -174,11 +167,6 @@ struct DemoCaptureConfiguration {
     var disablesPanelInteractionInWebView = false
 }
 
-struct DemoGestureConfiguration {
-    var recognizesSimultaneouslyWithOtherGestures = true
-    var failsOtherTapDuringDeceleration = true
-}
-
 struct DemoMovementConfiguration {
     var defaultStyle: DemoMovementStyle = .systemScroll
     var lowVelocityThreshold: CGFloat = 0.2
@@ -201,7 +189,6 @@ struct DemoEngineConfiguration {
     var handoff = DemoHandoffConfiguration()
     var bounce = DemoBounceConfiguration()
     var capture = DemoCaptureConfiguration()
-    var gesture = DemoGestureConfiguration()
     var movement = DemoMovementConfiguration()
     var indicator = DemoIndicatorConfiguration()
 }
@@ -223,11 +210,6 @@ protocol DemoDragEngineDelegate: AnyObject {
         _ engine: DemoDragEngine,
         adjustCaptureProposal proposal: inout DemoCaptureProposal
     )
-    func dragEngine(
-        _ engine: DemoDragEngine,
-        strategyFor gesture: UIGestureRecognizer,
-        otherGesture: UIGestureRecognizer
-    ) -> DemoGestureStrategy?
     func dragEngine(_ engine: DemoDragEngine, shouldBypassDetentsAt displayHeight: CGFloat) -> Bool?
     func dragEngine(
         _ engine: DemoDragEngine,
@@ -309,3 +291,53 @@ enum DemoDragEngineFactory {
         }
     }
 }
+
+#if DEBUG
+/// Keeps comparison diagnostics visually searchable and machine-filterable in the Xcode console.
+/// Every emitted message begins with `~~~`; field order is stable so OC/Swift logs diff cleanly.
+@MainActor
+enum DemoDebugLogger {
+    private static let outputQueue = DispatchQueue(label: "com.chbo297.BODragScrollDemo.diagnostics")
+
+    static func log(
+        _ implementation: DemoImplementation,
+        _ category: String,
+        fields: [String: String] = [:]
+    ) {
+        let renderedFields = fields.keys.sorted().map { key in
+            let value = fields[key, default: "-"]
+                .replacingOccurrences(of: "\n", with: "\\n")
+                .replacingOccurrences(of: "\r", with: "\\r")
+            return "\(key)=\(value)"
+        }.joined(separator: " ")
+        let suffix = renderedFields.isEmpty ? "" : " \(renderedFields)"
+        let message = "~~~[\(implementation.displayName)][\(category)]\(suffix)"
+        outputQueue.async {
+            NSLog("%@", message)
+        }
+    }
+
+    static func describe(_ scrollView: UIScrollView) -> String {
+        let pointer = Unmanaged.passUnretained(scrollView).toOpaque()
+        let pointerText = "0x" + String(UInt(bitPattern: pointer), radix: 16)
+        let identifier = scrollView.accessibilityIdentifier ?? "-"
+        let inset = scrollView.adjustedContentInset
+        let minimum = -inset.top
+        let maximum = max(
+            scrollView.contentSize.height + inset.bottom - scrollView.bounds.height,
+            minimum
+        )
+        return [
+            "\(String(describing: type(of: scrollView)))@\(pointerText)#\(identifier)",
+            "offset=\(number(scrollView.contentOffset.y))",
+            "range=\(number(minimum))->\(number(maximum))",
+            "contentH=\(number(scrollView.contentSize.height))",
+            "boundsH=\(number(scrollView.bounds.height))"
+        ].joined(separator: ",")
+    }
+
+    static func number(_ value: CGFloat) -> String {
+        String(format: "%.2f", Double(value))
+    }
+}
+#endif

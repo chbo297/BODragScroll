@@ -189,6 +189,21 @@ private extension MovementHandoffParityUITests {
         let trace: String
     }
 
+    func movementControl(
+        _ identifier: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> XCUIElement {
+        let control = requireElement(identifier, file: file, line: line)
+        XCTAssertTrue(
+            waitUntil(timeout: 2) { control.isHittable },
+            "Fixed movement control \(identifier) is not hittable",
+            file: file,
+            line: line
+        )
+        return control
+    }
+
     func assertMovementStyleParity(
         _ style: MovementStyle,
         file: StaticString = #filePath,
@@ -211,7 +226,6 @@ private extension MovementHandoffParityUITests {
     ) -> MovementStyleObservation {
         _ = launch(scenario: .movement, implementation: implementation, file: file, line: line)
 
-        _ = scrollToElement("movement.style", in: "movementControlsScroll", file: file, line: line)
         _ = selectSegment(control: "movement.style", label: style.rawValue, file: file, line: line)
 
         let high = performMovement(
@@ -224,10 +238,9 @@ private extension MovementHandoffParityUITests {
         XCTAssertGreaterThan(high, app.frame.height * 0.72, file: file, line: line)
         XCTAssertLessThanOrEqual(high, app.frame.height, file: file, line: line)
 
-        // Keep nearest next to the high action while the complete target card is visible. On
-        // compact panel heights, asking AX to scroll this independent controls view can synthesize
-        // a gesture outside its visible clipped rect and legitimately expand the host first. The
-        // range test below separately verifies a meaningful between-detents nearest calculation.
+        // The fixed operation surface keeps nearest available without scrolling the captured
+        // documentation view and accidentally changing the panel position first. The range test
+        // below separately verifies a meaningful between-detents nearest calculation.
         let nearest = performMovement(
             control: "movement.nearest",
             expectedHeight: high,
@@ -263,18 +276,10 @@ private extension MovementHandoffParityUITests {
         implementation: DemoImplementationUnderTest,
         requiresWillMove: Bool = true,
         requiresDelegateTerminal: Bool = true,
-        scrollDirection: XCUISwipeDirection = .up,
         file: StaticString = #filePath,
         line: UInt = #line
     ) -> CGFloat {
-        let button = scrollToElement(
-            identifier,
-            in: "movementControlsScroll",
-            direction: scrollDirection,
-            maximumSwipes: 10,
-            file: file,
-            line: line
-        )
+        let button = movementControl(identifier, file: file, line: line)
         let baseline = latestTraceSequence
         button.tap()
 
@@ -370,13 +375,7 @@ private extension MovementHandoffParityUITests {
         _ = launch(scenario: .movement, implementation: implementation, file: file, line: line)
         _ = dragPanel(deltaY: -app.frame.height * 0.72, file: file, line: line)
 
-        let rangeSwitch = scrollToElement(
-            "movement.range",
-            in: "movementControlsScroll",
-            maximumSwipes: 10,
-            file: file,
-            line: line
-        )
+        let rangeSwitch = movementControl("movement.range", file: file, line: line)
         rangeSwitch.tap()
         XCTAssertTrue(
             waitUntil(timeout: 3) {
@@ -454,13 +453,7 @@ private extension MovementHandoffParityUITests {
         line: UInt = #line
     ) -> CGFloat {
         _ = launch(scenario: .movement, implementation: implementation, file: file, line: line)
-        let rangeSwitch = scrollToElement(
-            "movement.range",
-            in: "movementControlsScroll",
-            maximumSwipes: 5,
-            file: file,
-            line: line
-        )
+        let rangeSwitch = movementControl("movement.range", file: file, line: line)
         rangeSwitch.tap()
         XCTAssertTrue(
             waitUntil(timeout: 3) { [weak self] in
@@ -483,13 +476,7 @@ private extension MovementHandoffParityUITests {
         XCTAssertEqual(retainedHeight, desiredHeight, accuracy: 20, file: file, line: line)
         XCTAssertTrue((190...360).contains(retainedHeight), file: file, line: line)
 
-        let visibleRangeSwitch = scrollToElement(
-            "movement.range",
-            in: "movementControlsScroll",
-            maximumSwipes: 5,
-            file: file,
-            line: line
-        )
+        let visibleRangeSwitch = movementControl("movement.range", file: file, line: line)
         visibleRangeSwitch.tap()
         XCTAssertTrue(
             waitUntil(timeout: 3) { [weak self] in
@@ -501,14 +488,7 @@ private extension MovementHandoffParityUITests {
             line: line
         )
 
-        let nearest = scrollToElement(
-            "movement.nearest",
-            in: "movementControlsScroll",
-            direction: .down,
-            maximumSwipes: 5,
-            file: file,
-            line: line
-        )
+        let nearest = movementControl("movement.nearest", file: file, line: line)
         let baseline = latestTraceSequence
         nearest.tap()
         XCTAssertTrue(
@@ -538,14 +518,7 @@ private extension MovementHandoffParityUITests {
         line: UInt = #line
     ) -> InterruptionObservation {
         _ = launch(scenario: .movement, implementation: implementation, file: file, line: line)
-        let button = scrollToElement(
-            "movement.interrupt",
-            in: "movementControlsScroll",
-            direction: .up,
-            maximumSwipes: 12,
-            file: file,
-            line: line
-        )
+        let button = movementControl("movement.interrupt", file: file, line: line)
         let baseline = latestTraceSequence
         button.tap()
 

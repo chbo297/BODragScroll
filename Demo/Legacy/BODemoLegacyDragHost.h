@@ -32,14 +32,6 @@ typedef NS_ENUM(NSInteger, BODemoLegacyBounceOwner) {
     BODemoLegacyBounceOwnerInnerScrollView = 1,
 };
 
-typedef NS_ENUM(NSInteger, BODemoLegacyGestureStrategy) {
-    BODemoLegacyGestureStrategyDefault = NSIntegerMax,
-    BODemoLegacyGestureStrategySimultaneous = 0,
-    BODemoLegacyGestureStrategyPanelFirst = 1,
-    BODemoLegacyGestureStrategyOtherFirst = -1,
-    BODemoLegacyGestureStrategySystemDefault = 3,
-};
-
 typedef NS_ENUM(NSInteger, BODemoLegacyAccessibilityDisposition) {
     BODemoLegacyAccessibilityDispositionAutomatic = 0,
     BODemoLegacyAccessibilityDispositionHandled = 1,
@@ -63,8 +55,6 @@ typedef NS_ENUM(NSInteger, BODemoLegacyAccessibilityDisposition) {
 
 @property (nonatomic, assign) BOOL ignoresMultipleNestedWebScrollViews;
 @property (nonatomic, assign) BOOL disablesPanelInteractionInWebView;
-@property (nonatomic, assign) BOOL recognizesSimultaneouslyWithOtherGestures;
-@property (nonatomic, assign) BOOL failsOtherTapDuringDeceleration;
 @property (nonatomic, assign) BOOL automaticallyShowsInnerIndicator;
 
 @property (nonatomic, assign) BODemoLegacyMovementStyle defaultMovementStyle;
@@ -95,10 +85,6 @@ typedef NS_ENUM(NSInteger, BODemoLegacyAccessibilityDisposition) {
 - (nullable NSDictionary<NSString *, id> *)legacyDragHost:(BODemoLegacyDragHost *)host
                                         adjustCaptureInfo:(NSDictionary<NSString *, id> *)captureInfo
     NS_SWIFT_NAME(legacyHost(_:adjustCaptureInfo:));
-- (BODemoLegacyGestureStrategy)legacyDragHost:(BODemoLegacyDragHost *)host
-                           strategyForGesture:(UIGestureRecognizer *)gesture
-                                 otherGesture:(UIGestureRecognizer *)otherGesture
-    NS_SWIFT_NAME(legacyHost(_:strategyFor:otherGesture:));
 - (BODemoLegacyMovementStyle)legacyDragHost:(BODemoLegacyDragHost *)host
                          movementStyleFromHeight:(CGFloat)fromHeight
                                        toHeight:(CGFloat)toHeight
