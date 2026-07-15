@@ -19,6 +19,16 @@ enum BODragScrollCaptureRebuildReason {
     case explicitReload
 }
 
+private enum BODragScrollParticipantSegmentSource {
+    case smart
+    case specified
+}
+
+private struct BODragScrollParticipantSegmentBuild {
+    let segments: [ParticipantSegmentSnapshot]
+    let detentHeights: [CGFloat]
+}
+
 @MainActor
 final class BODragScrollParticipant {
     let id: ParticipantID
@@ -726,12 +736,18 @@ extension BODragScrollView {
         }
 
         let currentDisplayHeight = displayHeightForCurrentGeometry
-        var participantSegments = makeParticipantSegments(
+        let smartCaptureDetentHeights = detentHeightsForCapture(
+            currentDisplayHeight: currentDisplayHeight
+        )
+        var segmentBuild = makeParticipantSegments(
             session: session,
             primary: primaryParticipant,
             currentDisplayHeight: currentDisplayHeight,
+            smartDetentHeights: smartCaptureDetentHeights,
             forceCurrentActivation: runtime.scrolling.isForcingMismatchRecovery
         )
+        var participantSegments = segmentBuild.segments
+        var captureDetentHeights = segmentBuild.detentHeights
         guard isCurrentCaptureOperation(operationEpoch),
               runtime.capture.session === session,
               ensureCaptureSessionIsCurrentAndHierarchyValid(session) else {
@@ -742,7 +758,11 @@ extension BODragScrollView {
             return
         }
 
-        var model = buildModel(session: session, participantSegments: participantSegments)
+        var model = buildModel(
+            session: session,
+            detentHeights: captureDetentHeights,
+            participantSegments: participantSegments
+        )
         guard var builtModel = model else {
             deactivateCompositeModel(in: session)
             return
@@ -759,18 +779,25 @@ extension BODragScrollView {
             )
 
         if !compatible, configuration.handoff.offsetMismatch == .continueFromCurrentOffset {
-            participantSegments = makeParticipantSegments(
+            segmentBuild = makeParticipantSegments(
                 session: session,
                 primary: primaryParticipant,
                 currentDisplayHeight: currentDisplayHeight,
+                smartDetentHeights: smartCaptureDetentHeights,
                 forceCurrentActivation: true
             )
+            participantSegments = segmentBuild.segments
+            captureDetentHeights = segmentBuild.detentHeights
             guard isCurrentCaptureOperation(operationEpoch),
                   runtime.capture.session === session,
                   ensureCaptureSessionIsCurrentAndHierarchyValid(session) else {
                 return
             }
-            model = buildModel(session: session, participantSegments: participantSegments)
+            model = buildModel(
+                session: session,
+                detentHeights: captureDetentHeights,
+                participantSegments: participantSegments
+            )
             if let continuationModel = model {
                 builtModel = continuationModel
                 state = compositeState(in: continuationModel, session: session)
@@ -808,6 +835,12 @@ extension BODragScrollView {
         }
         let compositeContentHeight = panelView.frame.height + totalParticipantDistance
         var compositeInsets = calculatedOuterInsets(panelHeight: panelView.frame.height)
+        if let captureMinimumDisplayHeight = captureDetentHeights.first {
+            // `forcesInnerTopBounce` makes the current exact detent the lower boundary for this
+            // touch's composite axis. Keep the public detent list unchanged and restore its normal
+            // inset when capture ends, matching the OC implementation's temporary attach-array.
+            compositeInsets.top = bounds.height - captureMinimumDisplayHeight
+        }
         if let firstSegment = builtModel.segments.first,
            let lastSegment = builtModel.segments.last {
             // Provider-defined participant activation heights may extend beyond panel detents.
@@ -896,12 +929,13 @@ extension BODragScrollView {
 
     private func buildModel(
         session: BODragScrollCaptureSession,
+        detentHeights: [CGFloat],
         participantSegments: [ParticipantSegmentSnapshot]
     ) -> ScrollModel? {
         let snapshot = ScrollModelSnapshot(
             viewportHeight: bounds.height,
             displayScale: displayScale,
-            detents: runtimeDetentHeights.map(ScrollSourceScalar.native),
+            detents: detentHeights.map(ScrollSourceScalar.native),
             participantOrder: session.participantChain.map(\.id),
             participantSegments: participantSegments
         )
@@ -918,17 +952,41 @@ extension BODragScrollView {
         session: BODragScrollCaptureSession,
         primary: BODragScrollParticipant,
         currentDisplayHeight: CGFloat,
+        smartDetentHeights: [CGFloat],
         forceCurrentActivation: Bool
-    ) -> [ParticipantSegmentSnapshot] {
-        guard let scrollView = primary.scrollView else { return [] }
+    ) -> BODragScrollParticipantSegmentBuild {
+        func build(
+            _ segments: [ParticipantSegmentSnapshot],
+            source: BODragScrollParticipantSegmentSource
+        ) -> BODragScrollParticipantSegmentBuild {
+            BODragScrollParticipantSegmentBuild(
+                segments: segments,
+                detentHeights: source == .smart ? smartDetentHeights : runtimeDetentHeights
+            )
+        }
+
+        guard let scrollView = primary.scrollView else {
+            return build([], source: .smart)
+        }
         let range = scrollableRange(of: scrollView)
-        guard range.canParticipate else { return [] }
+        guard range.canParticipate else { return build([], source: .smart) }
 
         let explicit = forceCurrentActivation
             ? nil
             : explicitSegments(for: scrollView, participantID: primary.id, range: range)
+        let source: BODragScrollParticipantSegmentSource
+        if forceCurrentActivation {
+            source = .smart
+        } else if explicit != nil || configuration.handoff.innerScrollPlacement.isSpecifiedHeight {
+            // The OC source builds both delegate-provided intervals and
+            // `prefDragInnerScrollDisplayH` through `scinnerinfoar`. That path deliberately skips
+            // the temporary force-bounce detent suffix used by its smart builder.
+            source = .specified
+        } else {
+            source = .smart
+        }
         if let explicit, explicit.count != 1 || session.participantChain.count == 1 {
-            return explicit
+            return build(explicit, source: source)
         }
 
         let displayScalar: ScrollSourceScalar
@@ -942,7 +1000,8 @@ extension BODragScrollView {
                 ? currentDisplayHeight
                 : automaticActivationHeight(
                     for: scrollView,
-                    currentDisplayHeight: currentDisplayHeight
+                    currentDisplayHeight: currentDisplayHeight,
+                    detentHeights: smartDetentHeights
                 )
             displayScalar = ScrollSourceScalar.objectiveCNumber(activationHeight)
         }
@@ -952,11 +1011,12 @@ extension BODragScrollView {
         let snapshots = nestedSnapshots(for: session)
         if snapshots.count == session.participantChain.count {
             do {
-                return try NestedParticipantBuilder.makeSegments(
+                let segments = try NestedParticipantBuilder.makeSegments(
                     chain: snapshots,
                     displayHeight: displayScalar,
                     comparison: comparisonPolicy
                 )
+                return build(segments, source: source)
             } catch {
                 // UIKit can expose transient geometry while a hierarchy is being relaid out.
                 // Preserve a valid primary-only model and retry on the next observed/layout pass.
@@ -964,17 +1024,17 @@ extension BODragScrollView {
         }
 
         if let explicit {
-            return explicit
+            return build(explicit, source: source)
         }
 
-        return [
+        return build([
             ParticipantSegmentSnapshot(
                 participantID: primary.id,
                 displayHeight: displayScalar,
                 innerStart: .native(range.minimum),
                 innerEnd: .native(range.maximum)
             )
-        ]
+        ], source: source)
     }
 
     private func explicitSegments(
@@ -1034,7 +1094,8 @@ extension BODragScrollView {
 
     private func automaticActivationHeight(
         for scrollView: UIScrollView,
-        currentDisplayHeight: CGFloat
+        currentDisplayHeight: CGFloat,
+        detentHeights: [CGFloat]
     ) -> CGFloat {
         switch configuration.handoff.innerScrollPlacement {
         case .fromTouchedPosition:
@@ -1042,24 +1103,25 @@ extension BODragScrollView {
         case .atDisplayHeight(let height):
             return height
         case .afterPanelFullyDisplayed:
-            return detentForFullyDisplayed(scrollView) ?? maximumConfiguredDisplayHeight
+            return detentForFullyDisplayed(scrollView, detentHeights: detentHeights)
+                ?? maximumConfiguredDisplayHeight
         case .automatic:
             break
         }
 
-        guard !runtimeDetentHeights.isEmpty else { return currentDisplayHeight }
+        guard !detentHeights.isEmpty else { return currentDisplayHeight }
         let originY = panelOriginY(of: scrollView)
         let scrollHeight = max(scrollView.frame.height, 1)
         let minimumRatio = configuration.handoff.minimumInnerVisibilityRatio
         let startIndex = ScrollMath.sortedIndex(
-            in: runtimeDetentHeights.map(ScrollSourceScalar.native),
+            in: detentHeights.map(ScrollSourceScalar.native),
             value: currentDisplayHeight,
             nearby: false,
             ceil: true
         )
 
-        for index in startIndex..<runtimeDetentHeights.count {
-            let detent = runtimeDetentHeights[index]
+        for index in startIndex..<detentHeights.count {
+            let detent = detentHeights[index]
             if (detent - originY) / scrollHeight >= minimumRatio {
                 return detent
             }
@@ -1067,22 +1129,44 @@ extension BODragScrollView {
 
         let fullyVisibleHeight = originY + scrollHeight
         let lowerIndex = ScrollMath.sortedIndex(
-            in: runtimeDetentHeights.map(ScrollSourceScalar.native),
+            in: detentHeights.map(ScrollSourceScalar.native),
             value: fullyVisibleHeight,
             nearby: false,
             ceil: false
         )
-        let fallback = runtimeDetentHeights[lowerIndex]
+        let fallback = detentHeights[lowerIndex]
         return (fallback - originY) / scrollHeight >= minimumRatio
             ? fallback
             : currentDisplayHeight
     }
 
-    private func detentForFullyDisplayed(_ scrollView: UIScrollView) -> CGFloat? {
+    private func detentForFullyDisplayed(
+        _ scrollView: UIScrollView,
+        detentHeights: [CGFloat]
+    ) -> CGFloat? {
         let requiredHeight = panelOriginY(of: scrollView) + scrollView.frame.height
-        return runtimeDetentHeights.first {
+        return detentHeights.first {
             $0 + comparisonPolicy.boundaryBand >= requiredHeight
-        } ?? runtimeDetentHeights.last
+        } ?? detentHeights.last
+    }
+
+    /// Mirrors the source's temporary `theattachar` suffix. This is an exact source-number
+    /// decision: the one-physical-pixel comparison band is intentionally not used here.
+    private func detentHeightsForCapture(currentDisplayHeight: CGFloat) -> [CGFloat] {
+        let detents = runtimeDetentHeights
+        guard configuration.bounce.forcesInnerTopBounce,
+              detents.count > 1 else { return detents }
+
+        let index = ScrollMath.sortedIndex(
+            in: detents.map(ScrollSourceScalar.native),
+            value: currentDisplayHeight,
+            nearby: true,
+            ceil: false
+        )
+        guard index > 0,
+              detents.indices.contains(index),
+              detents[index] == currentDisplayHeight else { return detents }
+        return Array(detents[index...])
     }
 
     private func panelOriginY(of scrollView: UIScrollView) -> CGFloat {
@@ -1153,43 +1237,61 @@ extension BODragScrollView {
         in model: ScrollModel,
         session: BODragScrollCaptureSession
     ) -> CompositeState {
-        var progress: CGFloat = 0
-        var stopped = false
-        var stoppedOwner: ParticipantID?
-        var valid = true
         let epsilon = model.comparison.jitterEpsilon
+        let participantSegments = model.segments.filter(\.isParticipantSegment)
+        guard !participantSegments.isEmpty else {
+            return CompositeState(progress: 0, isValidPrefix: true)
+        }
 
+        // A nested ancestor may own one slice before its child and another after it. Validating
+        // each future slice against its own `innerStart` is incorrect before the earlier prefix has
+        // been consumed: the ancestor's one real contentOffset must still equal its first slice's
+        // start. Invert candidate positions through the already-built model instead, then compare
+        // the complete projected chain with UIKit's current offsets.
+        var candidateOuterOffsets: [CGFloat] = []
+        for segment in participantSegments {
+            guard let id = segment.participantID,
+                  let value = session.participant(with: id)?.scrollView?.contentOffset.y else {
+                return CompositeState(progress: 0, isValidPrefix: false)
+            }
+            guard value >= segment.innerStart - epsilon,
+                  value <= segment.innerEnd + epsilon else { continue }
+
+            let clampedValue = min(segment.innerEnd, max(segment.innerStart, value))
+            candidateOuterOffsets.append(
+                segment.outerStart + clampedValue - segment.innerStart
+            )
+        }
+
+        for candidateOuterOffset in candidateOuterOffsets {
+            let candidate = model.projection(at: candidateOuterOffset)
+            if projection(candidate, matches: session) {
+                return CompositeState(
+                    progress: candidate.panelTranslation,
+                    isValidPrefix: true
+                )
+            }
+        }
+
+        // Preserve a useful monotonic fallback for offset-mismatch recovery. It intentionally does
+        // not claim validity; restore/continue policy still decides how the incompatible external
+        // state is reconciled.
+        var progress: CGFloat = 0
         for segment in model.segments where segment.isParticipantSegment {
             guard let id = segment.participantID,
                   let value = session.participant(with: id)?.scrollView?.contentOffset.y else {
                 return CompositeState(progress: progress, isValidPrefix: false)
             }
-
-            if stopped {
-                // One ancestor may own a slice before and another slice after its child. If that
-                // ancestor is the participant at which progress stopped, its single real offset
-                // cannot simultaneously equal the later slice's start; that later slice is not an
-                // invalid prefix. Other owners after the stop must still remain at their starts.
-                if id == stoppedOwner {
-                    continue
-                }
-                if abs(value - segment.innerStart) > epsilon {
-                    valid = false
-                }
-                continue
-            }
             if value >= segment.innerEnd - epsilon {
                 progress += segment.innerLength
             } else if value > segment.innerStart + epsilon {
                 progress += value - segment.innerStart
-                stopped = true
-                stoppedOwner = id
+                break
             } else {
-                stopped = true
-                stoppedOwner = id
+                break
             }
         }
-        return CompositeState(progress: progress, isValidPrefix: valid)
+        return CompositeState(progress: progress, isValidPrefix: false)
     }
 
     private func projection(

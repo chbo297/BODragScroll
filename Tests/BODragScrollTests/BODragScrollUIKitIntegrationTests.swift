@@ -1038,6 +1038,54 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertTrue(participantOwners.contains(ancestorID))
     }
 
+    func testThreeLevelNestedInitialPrefixProjectsIntoOutermostBeforeSlice() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
+        _ = dragScrollView.move(toDisplayHeight: 500, animated: false)
+
+        let outer = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 400),
+            contentHeight: 1_200
+        )
+        let outerContent = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 1_200))
+        outer.addSubview(outerContent)
+
+        let middle = makeScrollView(
+            frame: CGRect(x: 0, y: 100, width: 320, height: 500),
+            contentHeight: 900
+        )
+        let middleContent = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 900))
+        middle.addSubview(middleContent)
+        outerContent.addSubview(middle)
+
+        let deep = makeScrollView(
+            frame: CGRect(x: 0, y: 100, width: 320, height: 200),
+            contentHeight: 600
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 10, width: 40, height: 40))
+        deep.addSubview(leafView)
+        middleContent.addSubview(deep)
+        panelView.addSubview(outer)
+
+        dragScrollView.beginCapture(from: leafView)
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        XCTAssertEqual(session.participantChain.count, 3)
+        XCTAssertEqual(dragScrollView.runtime.scrolling.mismatchDirection, 0)
+
+        let owners = model.segments.compactMap(\.participantID)
+        XCTAssertEqual(owners.first, session.participantChain[2].id)
+        XCTAssertEqual(owners.last, session.participantChain[2].id)
+
+        let initialOuterOffset = dragScrollView.contentOffset.y
+        dragScrollView.contentOffset.y = initialOuterOffset + 80
+        dragScrollView.scrollViewDidScroll(dragScrollView)
+
+        XCTAssertEqual(outer.contentOffset.y, 80, accuracy: 0.001)
+        XCTAssertEqual(middle.contentOffset.y, 0, accuracy: 0.001)
+        XCTAssertEqual(deep.contentOffset.y, 0, accuracy: 0.001)
+        XCTAssertEqual(dragScrollView.displayHeight, 500, accuracy: 0.001)
+    }
+
     func testProjectionWritesPanelFrameBeforeParticipantOffset() throws {
         let (dragScrollView, panelView) = makeHost()
         let participant = OffsetObservingScrollView(
@@ -1467,6 +1515,229 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             participant.contentSize.height
                 + participant.effectiveContentInset.bottom
                 - participant.bounds.height
+        )
+    }
+
+    func testForcedInnerTopBounceUsesCurrentExactDetentAsCaptureMinimum() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
+
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+
+        var configuration = dragScrollView.configuration
+        configuration.bounce.forcesInnerTopBounce = true
+        configuration.bounce.preferredTopOwner = .innerScrollView
+        dragScrollView.configuration = configuration
+        dragScrollView.beginCapture(from: leafView)
+
+        let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        XCTAssertEqual(model.detentDisplayHeights, [300, 500])
+        XCTAssertEqual(
+            dragScrollView.minimumOuterOffset,
+            300 - dragScrollView.bounds.height,
+            accuracy: 0.001
+        )
+
+        let minimum = dragScrollView.minimumOuterOffset
+        dragScrollView.contentOffset.y = minimum - 30
+        dragScrollView.scrollViewDidScroll(dragScrollView)
+
+        XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
+        XCTAssertEqual(participant.contentOffset.y, -30, accuracy: 0.001)
+        XCTAssertEqual(panelView.frame.minY, -30, accuracy: 0.001)
+    }
+
+    func testForcedInnerTopBounceKeepsSuffixForEverySmartPlacement() throws {
+        let placements: [BODragScrollInnerScrollPlacement] = [
+            .automatic,
+            .fromTouchedPosition,
+            .afterPanelFullyDisplayed
+        ]
+
+        for placement in placements {
+            let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
+            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            let participant = makeScrollView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+                contentHeight: 900
+            )
+            let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+            participant.addSubview(leafView)
+            panelView.addSubview(participant)
+
+            var configuration = dragScrollView.configuration
+            configuration.bounce.forcesInnerTopBounce = true
+            configuration.handoff.innerScrollPlacement = placement
+            dragScrollView.configuration = configuration
+            dragScrollView.beginCapture(from: leafView)
+
+            let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+            XCTAssertEqual(model.detentDisplayHeights, [300, 500], "\(placement)")
+            XCTAssertEqual(
+                dragScrollView.minimumOuterOffset,
+                300 - dragScrollView.bounds.height,
+                accuracy: 0.001,
+                "\(placement)"
+            )
+            dragScrollView.endCapture()
+        }
+    }
+
+    func testForcedInnerTopBounceDoesNotTrimFixedPlacementDetents() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+
+        var configuration = dragScrollView.configuration
+        configuration.bounce.forcesInnerTopBounce = true
+        configuration.handoff.innerScrollPlacement = .atDisplayHeight(300)
+        dragScrollView.configuration = configuration
+        dragScrollView.beginCapture(from: leafView)
+
+        let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        XCTAssertEqual(model.detentDisplayHeights, [100, 300, 500])
+        XCTAssertEqual(
+            dragScrollView.minimumOuterOffset,
+            100 - dragScrollView.bounds.height,
+            accuracy: 0.001
+        )
+
+        dragScrollView.contentOffset.y -= 30
+        dragScrollView.scrollViewDidScroll(dragScrollView)
+        XCTAssertEqual(dragScrollView.displayHeight, 270, accuracy: 0.001)
+        XCTAssertEqual(participant.contentOffset.y, 0, accuracy: 0.001)
+        XCTAssertEqual(panelView.frame.minY, 0, accuracy: 0.001)
+    }
+
+    func testForcedInnerTopBounceDoesNotTrimProviderSpecifiedDetents() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300,
+                beginOffsetY: 0,
+                endOffsetY: 200
+            ),
+            BODragScrollInnerScrollSegment(
+                displayHeight: 500,
+                beginOffsetY: 200,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+
+        var configuration = dragScrollView.configuration
+        configuration.bounce.forcesInnerTopBounce = true
+        dragScrollView.configuration = configuration
+        dragScrollView.beginCapture(from: leafView)
+
+        let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        XCTAssertEqual(model.detentDisplayHeights, [100, 300, 500])
+        XCTAssertEqual(
+            model.segments.filter(\.isParticipantSegment).map(\.displayHeight),
+            [300, 500]
+        )
+        XCTAssertEqual(
+            dragScrollView.minimumOuterOffset,
+            100 - dragScrollView.bounds.height,
+            accuracy: 0.001
+        )
+    }
+
+    func testForcedInnerTopBounceKeepsSingleSpecifiedSegmentAcrossNestedChain() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+
+        let outer = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 500),
+            contentHeight: 1_200
+        )
+        let outerContent = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 1_200))
+        outer.addSubview(outerContent)
+        let primary = makeScrollView(
+            frame: CGRect(x: 0, y: 100, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        primary.addSubview(leafView)
+        outerContent.addSubview(primary)
+        panelView.addSubview(outer)
+
+        var configuration = dragScrollView.configuration
+        configuration.bounce.forcesInnerTopBounce = true
+        dragScrollView.configuration = configuration
+        dragScrollView.beginCapture(from: leafView)
+
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        XCTAssertEqual(session.participantChain.count, 2)
+        XCTAssertEqual(model.detentDisplayHeights, [100, 300, 500])
+        let owners = Set(model.segments.compactMap(\.participantID))
+        XCTAssertEqual(owners, Set(session.participantChain.map(\.id)))
+        XCTAssertLessThanOrEqual(
+            dragScrollView.minimumOuterOffset,
+            100 - dragScrollView.bounds.height + 0.001
+        )
+    }
+
+    func testForcedInnerTopBounceFallsBackToSmartSuffixForInvalidSpecifiedSegments() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: .nan,
+                beginOffsetY: .infinity,
+                endOffsetY: -.infinity
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+
+        var configuration = dragScrollView.configuration
+        configuration.bounce.forcesInnerTopBounce = true
+        dragScrollView.configuration = configuration
+        dragScrollView.beginCapture(from: leafView)
+
+        let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        XCTAssertEqual(model.detentDisplayHeights, [300, 500])
+        XCTAssertEqual(
+            dragScrollView.minimumOuterOffset,
+            300 - dragScrollView.bounds.height,
+            accuracy: 0.001
         )
     }
 

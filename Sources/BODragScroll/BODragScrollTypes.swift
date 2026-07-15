@@ -144,6 +144,13 @@ public enum BODragScrollInnerScrollPlacement: Sendable, Equatable {
     case fromTouchedPosition
 }
 
+extension BODragScrollInnerScrollPlacement {
+    var isSpecifiedHeight: Bool {
+        if case .atDisplayHeight = self { return true }
+        return false
+    }
+}
+
 /// How to reconcile an inner offset that does not match the segment for the panel's current height.
 public enum BODragScrollOffsetMismatchPolicy: Sendable {
     /// Preserve the inner offset and move the panel until the matching segment becomes reachable.

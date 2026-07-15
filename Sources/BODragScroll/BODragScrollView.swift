@@ -162,6 +162,45 @@ public final class BODragScrollView: UIScrollView {
     /// Event-only notifications. The inherited `UIScrollView.delegate` remains private to the engine.
     public weak var eventDelegate: BODragScrollEventDelegate?
 
+    /// Re-evaluate the panel size supplied by `behaviorProvider` without replacing the panel view.
+    ///
+    /// Use this after an external sizing input changes while this view's own bounds stay the same.
+    /// The currently visible height is preserved when possible, and any in-flight movement is
+    /// reconciled through the same layout-interruption path used for a viewport-size change.
+    public func invalidatePanelLayout() {
+        if isInternallyMutating {
+            runtime.deferredMovementActions.append { [weak self] in
+                self?.invalidatePanelLayout()
+            }
+            return
+        }
+
+        advanceDecisionGeometryRevision()
+        runtime.panel.needsPanelLayout = true
+
+        if runtime.panel.hasCompletedLayout,
+           runtime.panel.lastLayoutBounds.size == bounds.size,
+           let panelView = panelViewStorage {
+            let visibleBounds = layer.presentation()?.bounds ?? bounds
+            let visiblePanelOrigin = panelView.layer.presentation()?.frame.minY
+                ?? panelView.frame.minY
+            let preservedDisplayHeight = normalizeFinite(
+                visibleBounds.height - (visiblePanelOrigin - visibleBounds.minY),
+                fallback: displayHeight
+            )
+            transitionPanelLayoutDidInvalidate()
+            runtime.panel.preservedDisplayHeightForNextLayout = preservedDisplayHeight
+            interruptMovementForLayoutChange(finalDisplayHeight: preservedDisplayHeight)
+            if nativeScrollState.isDecelerating {
+                withInternalMutation {
+                    setContentOffset(contentOffset, animated: false)
+                }
+            }
+        }
+
+        setNeedsLayout()
+    }
+
     // MARK: Shared internal storage
 
     let runtime = BODragScrollRuntimeState()
