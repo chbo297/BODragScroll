@@ -1,0 +1,722 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 63;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		040D6436F4A811FF1D7F9C72 /* BasicScenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A2A6C0E0DCA9F970BBCA40 /* BasicScenarios.swift */; };
+		1089583760F938599CAFC704 /* DemoScenarioViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BE85FD71823C44EC2FD29E1 /* DemoScenarioViewController.swift */; };
+		17A62664F404DCD013487BAF /* BODemoLegacyDragHost.h in Headers */ = {isa = PBXBuildFile; fileRef = FCB67C42BE9C92026542B51A /* BODemoLegacyDragHost.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		265F2459CF5470066C44453E /* BODragScroll in Frameworks */ = {isa = PBXBuildFile; productRef = D09D8FDD3D8E93853D5DD5CE /* BODragScroll */; };
+		36C13572AE46F59C90F33D5C /* BODemoLegacyDragHost.m in Sources */ = {isa = PBXBuildFile; fileRef = E5315EBDC27474A46D42229C /* BODemoLegacyDragHost.m */; };
+		390D1624CD0E838732E35F3B /* SystemIntegrationScenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8863427F811157D6BB8CFB6C /* SystemIntegrationScenarios.swift */; };
+		3B0E87238AEE00256A9A639A /* DemoUITestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BD86A79D055BB9D83C99C0F /* DemoUITestSupport.swift */; };
+		4761DD71A24CA0759AF9BF6C /* DemoTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BDFB2E41108F5B5A54EA667 /* DemoTheme.swift */; };
+		48CD573AF5824B0EE120D480 /* PolicyParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D08768EC970DAA4EED148F3 /* PolicyParityUITests.swift */; };
+		54CFF59743E573B348D10192 /* BODragScrollView.m in Sources */ = {isa = PBXBuildFile; fileRef = 2B3F0E5176BA98A5658A3767 /* BODragScrollView.m */; };
+		55442BBF8E0245C54E9C168D /* DemoDataSources.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F841C935D35B32CFE44DFF /* DemoDataSources.swift */; };
+		566292392D295544F557F07E /* BODragScrollLegacy.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = CE4973D5A55C723EC65C80AB /* BODragScrollLegacy.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		85FE841E5CB8C9095898FC21 /* MovementHandoffParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C32F22DA37DA8A18757F53CA /* MovementHandoffParityUITests.swift */; };
+		8AEA0FA2D1CF1F104334C424 /* ViewportSafetyParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAE1CBAE74B396BC3FE6C6E4 /* ViewportSafetyParityUITests.swift */; };
+		91CDB3EFD8B81ED75A8F461D /* BODragScrollDemoSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD333F9E46ABD8E00E1C42F /* BODragScrollDemoSmokeUITests.swift */; };
+		988FEF42008528C8BDBF5FD2 /* DemoCatalogViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73923E1FDD650650E9093D1 /* DemoCatalogViewController.swift */; };
+		9D3BC2240659E923A6059EF2 /* ScrollingScenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */; };
+		AE213031163A0041BAE74060 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BC2A0C0CA19A2D04797C3DF /* AppDelegate.swift */; };
+		BD91AE5D378F639791324859 /* BODragScrollLegacy.h in Headers */ = {isa = PBXBuildFile; fileRef = BA3A54B63AA9A4568CBFBF2E /* BODragScrollLegacy.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		C2C02A858F811D9C8065967A /* BODragScrollLegacy.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE4973D5A55C723EC65C80AB /* BODragScrollLegacy.framework */; };
+		C5D314DA0BB222A36328F8FA /* LegacyDemoDragEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6EBEA2CE99F30FAB592656C /* LegacyDemoDragEngine.swift */; };
+		CB1FF9A6314F544A24A295FC /* BODragScrollView.h in Headers */ = {isa = PBXBuildFile; fileRef = 087DC6920DE62E6A8B5922A1 /* BODragScrollView.h */; };
+		CEC22DDF07B6C66C07FD0B88 /* DemoDragEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4789AD544A7C11E16A87130 /* DemoDragEngine.swift */; };
+		D514ED3E388B6DF17E12CF2E /* DemoPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 361AE84A2A510D8769F70738 /* DemoPanelView.swift */; };
+		D56CD9BC32C97A756BE3BDB4 /* SwiftDemoDragEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 879252DE65A8C73E2935EDFD /* SwiftDemoDragEngine.swift */; };
+		D9B78815B75DE192190FA008 /* DemoScenario.swift in Sources */ = {isa = PBXBuildFile; fileRef = C93FBB58B91FCD04E0CBB793 /* DemoScenario.swift */; };
+		E0D1E516D5FCE9E3861A4F7D /* NestedExplicitParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39E138C3E5D87CF270D672D3 /* NestedExplicitParityUITests.swift */; };
+		E6FBCBB42996982E84E9750E /* FreePanelBoundaryUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1263890E5EF3F0980C659D0 /* FreePanelBoundaryUITests.swift */; };
+		E9981EF75DB79506C3E17839 /* PolicyLabViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F527640D8B8C96FF338A7A9C /* PolicyLabViewController.swift */; };
+		E9A127962FE3F599A171CDA2 /* DemoTraceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6DE6FCDD9E5D330905023DF /* DemoTraceRecorder.swift */; };
+		FF052FEC9C380E89D6621853 /* WebControlsParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59E057A564BA0B1E33CEA4B5 /* WebControlsParityUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B0F9836EC4FACEC3A38A7D9B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7F0DD2B31BBF0453F1EA4628 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C5A43F5EC6C37DD1BD33AD85;
+			remoteInfo = BODragScrollDemo;
+		};
+		BB05F5C49DCFF1918C6C1358 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7F0DD2B31BBF0453F1EA4628 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 34173A72E751D2CFF35700AD;
+			remoteInfo = BODragScrollLegacy;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		99AA71FA17765763C92C5C2C /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				566292392D295544F557F07E /* BODragScrollLegacy.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		087DC6920DE62E6A8B5922A1 /* BODragScrollView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BODragScrollView.h; sourceTree = "<group>"; };
+		0BD333F9E46ABD8E00E1C42F /* BODragScrollDemoSmokeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BODragScrollDemoSmokeUITests.swift; sourceTree = "<group>"; };
+		0D08768EC970DAA4EED148F3 /* PolicyParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyParityUITests.swift; sourceTree = "<group>"; };
+		2B3F0E5176BA98A5658A3767 /* BODragScrollView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = BODragScrollView.m; sourceTree = "<group>"; };
+		34C91DB1D6A73B0F51BDCDB2 /* BODragScrollDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BODragScrollDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		361AE84A2A510D8769F70738 /* DemoPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoPanelView.swift; sourceTree = "<group>"; };
+		39E138C3E5D87CF270D672D3 /* NestedExplicitParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NestedExplicitParityUITests.swift; sourceTree = "<group>"; };
+		4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollingScenarios.swift; sourceTree = "<group>"; };
+		59E057A564BA0B1E33CEA4B5 /* WebControlsParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebControlsParityUITests.swift; sourceTree = "<group>"; };
+		6BD86A79D055BB9D83C99C0F /* DemoUITestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoUITestSupport.swift; sourceTree = "<group>"; };
+		6BDFB2E41108F5B5A54EA667 /* DemoTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoTheme.swift; sourceTree = "<group>"; };
+		74257432936EA4AA6B7B9AF8 /* BODragScrollDemoUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BODragScrollDemoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		879252DE65A8C73E2935EDFD /* SwiftDemoDragEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDemoDragEngine.swift; sourceTree = "<group>"; };
+		8863427F811157D6BB8CFB6C /* SystemIntegrationScenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemIntegrationScenarios.swift; sourceTree = "<group>"; };
+		8BE85FD71823C44EC2FD29E1 /* DemoScenarioViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoScenarioViewController.swift; sourceTree = "<group>"; };
+		9BC2A0C0CA19A2D04797C3DF /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		B2A2A6C0E0DCA9F970BBCA40 /* BasicScenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BasicScenarios.swift; sourceTree = "<group>"; };
+		B6DE6FCDD9E5D330905023DF /* DemoTraceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoTraceRecorder.swift; sourceTree = "<group>"; };
+		BA3A54B63AA9A4568CBFBF2E /* BODragScrollLegacy.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BODragScrollLegacy.h; sourceTree = "<group>"; };
+		C32F22DA37DA8A18757F53CA /* MovementHandoffParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovementHandoffParityUITests.swift; sourceTree = "<group>"; };
+		C4789AD544A7C11E16A87130 /* DemoDragEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoDragEngine.swift; sourceTree = "<group>"; };
+		C93FBB58B91FCD04E0CBB793 /* DemoScenario.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoScenario.swift; sourceTree = "<group>"; };
+		CA40F736BDC0A85FCCB2D135 /* BODragScroll */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BODragScroll; path = ..; sourceTree = SOURCE_ROOT; };
+		CE4973D5A55C723EC65C80AB /* BODragScrollLegacy.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = BODragScrollLegacy.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		E1263890E5EF3F0980C659D0 /* FreePanelBoundaryUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreePanelBoundaryUITests.swift; sourceTree = "<group>"; };
+		E2F841C935D35B32CFE44DFF /* DemoDataSources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoDataSources.swift; sourceTree = "<group>"; };
+		E5315EBDC27474A46D42229C /* BODemoLegacyDragHost.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = BODemoLegacyDragHost.m; sourceTree = "<group>"; };
+		E6EBEA2CE99F30FAB592656C /* LegacyDemoDragEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyDemoDragEngine.swift; sourceTree = "<group>"; };
+		E73923E1FDD650650E9093D1 /* DemoCatalogViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoCatalogViewController.swift; sourceTree = "<group>"; };
+		F527640D8B8C96FF338A7A9C /* PolicyLabViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyLabViewController.swift; sourceTree = "<group>"; };
+		FAE1CBAE74B396BC3FE6C6E4 /* ViewportSafetyParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewportSafetyParityUITests.swift; sourceTree = "<group>"; };
+		FCB67C42BE9C92026542B51A /* BODemoLegacyDragHost.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BODemoLegacyDragHost.h; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F42C9C75E0C87DB64210CB5F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				265F2459CF5470066C44453E /* BODragScroll in Frameworks */,
+				C2C02A858F811D9C8065967A /* BODragScrollLegacy.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0651DF48F85F19EBE735A834 /* Original */ = {
+			isa = PBXGroup;
+			children = (
+				087DC6920DE62E6A8B5922A1 /* BODragScrollView.h */,
+				2B3F0E5176BA98A5658A3767 /* BODragScrollView.m */,
+			);
+			path = Original;
+			sourceTree = "<group>";
+		};
+		0DF962F1B1DEAEE71B263A22 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				9BC2A0C0CA19A2D04797C3DF /* AppDelegate.swift */,
+				E73923E1FDD650650E9093D1 /* DemoCatalogViewController.swift */,
+				C93FBB58B91FCD04E0CBB793 /* DemoScenario.swift */,
+				4391CBEF3D29033AA3384E2A /* Engine */,
+				C78E686F332F216FC4767816 /* Scenarios */,
+				B3B86B5DD9CB6E4121E97474 /* Shared */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		1228E125217E3327FA907C75 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				34C91DB1D6A73B0F51BDCDB2 /* BODragScrollDemo.app */,
+				74257432936EA4AA6B7B9AF8 /* BODragScrollDemoUITests.xctest */,
+				CE4973D5A55C723EC65C80AB /* BODragScrollLegacy.framework */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		306443D71C01D3719F4CE1B2 /* Legacy */ = {
+			isa = PBXGroup;
+			children = (
+				FCB67C42BE9C92026542B51A /* BODemoLegacyDragHost.h */,
+				E5315EBDC27474A46D42229C /* BODemoLegacyDragHost.m */,
+				BA3A54B63AA9A4568CBFBF2E /* BODragScrollLegacy.h */,
+				0651DF48F85F19EBE735A834 /* Original */,
+			);
+			path = Legacy;
+			sourceTree = "<group>";
+		};
+		4391CBEF3D29033AA3384E2A /* Engine */ = {
+			isa = PBXGroup;
+			children = (
+				C4789AD544A7C11E16A87130 /* DemoDragEngine.swift */,
+				E6EBEA2CE99F30FAB592656C /* LegacyDemoDragEngine.swift */,
+				879252DE65A8C73E2935EDFD /* SwiftDemoDragEngine.swift */,
+			);
+			path = Engine;
+			sourceTree = "<group>";
+		};
+		76DFC81776DE6CBD5C8DF91E /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				0BD333F9E46ABD8E00E1C42F /* BODragScrollDemoSmokeUITests.swift */,
+				6BD86A79D055BB9D83C99C0F /* DemoUITestSupport.swift */,
+				E1263890E5EF3F0980C659D0 /* FreePanelBoundaryUITests.swift */,
+				C32F22DA37DA8A18757F53CA /* MovementHandoffParityUITests.swift */,
+				39E138C3E5D87CF270D672D3 /* NestedExplicitParityUITests.swift */,
+				0D08768EC970DAA4EED148F3 /* PolicyParityUITests.swift */,
+				FAE1CBAE74B396BC3FE6C6E4 /* ViewportSafetyParityUITests.swift */,
+				59E057A564BA0B1E33CEA4B5 /* WebControlsParityUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+		782EAFC825BD1555EE4A0D70 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				CA40F736BDC0A85FCCB2D135 /* BODragScroll */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		ACB3D76B681EC8ECC7628609 = {
+			isa = PBXGroup;
+			children = (
+				306443D71C01D3719F4CE1B2 /* Legacy */,
+				782EAFC825BD1555EE4A0D70 /* Packages */,
+				0DF962F1B1DEAEE71B263A22 /* Sources */,
+				76DFC81776DE6CBD5C8DF91E /* UITests */,
+				1228E125217E3327FA907C75 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B3B86B5DD9CB6E4121E97474 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				E2F841C935D35B32CFE44DFF /* DemoDataSources.swift */,
+				361AE84A2A510D8769F70738 /* DemoPanelView.swift */,
+				8BE85FD71823C44EC2FD29E1 /* DemoScenarioViewController.swift */,
+				6BDFB2E41108F5B5A54EA667 /* DemoTheme.swift */,
+				B6DE6FCDD9E5D330905023DF /* DemoTraceRecorder.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		C78E686F332F216FC4767816 /* Scenarios */ = {
+			isa = PBXGroup;
+			children = (
+				B2A2A6C0E0DCA9F970BBCA40 /* BasicScenarios.swift */,
+				F527640D8B8C96FF338A7A9C /* PolicyLabViewController.swift */,
+				4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */,
+				8863427F811157D6BB8CFB6C /* SystemIntegrationScenarios.swift */,
+			);
+			path = Scenarios;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		7C133BB2FCC845E8C22FD2D4 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				17A62664F404DCD013487BAF /* BODemoLegacyDragHost.h in Headers */,
+				BD91AE5D378F639791324859 /* BODragScrollLegacy.h in Headers */,
+				CB1FF9A6314F544A24A295FC /* BODragScrollView.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		34173A72E751D2CFF35700AD /* BODragScrollLegacy */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0B2E972333B02F335E841737 /* Build configuration list for PBXNativeTarget "BODragScrollLegacy" */;
+			buildPhases = (
+				7C133BB2FCC845E8C22FD2D4 /* Headers */,
+				9D0C24DF0B619DDC4B99240A /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BODragScrollLegacy;
+			packageProductDependencies = (
+			);
+			productName = BODragScrollLegacy;
+			productReference = CE4973D5A55C723EC65C80AB /* BODragScrollLegacy.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		830BC313867298FF7C1D0EDD /* BODragScrollDemoUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0C0823F23D3CE22E6517E197 /* Build configuration list for PBXNativeTarget "BODragScrollDemoUITests" */;
+			buildPhases = (
+				B32C130C30389C473B60FC00 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DD729B6C3066C857B294BC7C /* PBXTargetDependency */,
+			);
+			name = BODragScrollDemoUITests;
+			packageProductDependencies = (
+			);
+			productName = BODragScrollDemoUITests;
+			productReference = 74257432936EA4AA6B7B9AF8 /* BODragScrollDemoUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		C5A43F5EC6C37DD1BD33AD85 /* BODragScrollDemo */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EA2AA8EACA766F643FB8B151 /* Build configuration list for PBXNativeTarget "BODragScrollDemo" */;
+			buildPhases = (
+				2FA69701B34ED6C302B9A872 /* Sources */,
+				F42C9C75E0C87DB64210CB5F /* Frameworks */,
+				99AA71FA17765763C92C5C2C /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				85ACF647E68F9CC724E0F52D /* PBXTargetDependency */,
+			);
+			name = BODragScrollDemo;
+			packageProductDependencies = (
+				D09D8FDD3D8E93853D5DD5CE /* BODragScroll */,
+			);
+			productName = BODragScrollDemo;
+			productReference = 34C91DB1D6A73B0F51BDCDB2 /* BODragScrollDemo.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		7F0DD2B31BBF0453F1EA4628 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					830BC313867298FF7C1D0EDD = {
+						TestTargetID = C5A43F5EC6C37DD1BD33AD85;
+					};
+				};
+			};
+			buildConfigurationList = 69BC73B9030FDEA5B78E1589 /* Build configuration list for PBXProject "BODragScrollDemo" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = ACB3D76B681EC8ECC7628609;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FEFA1AF88B65CB44F4B9FB0F /* XCLocalSwiftPackageReference ".." */,
+			);
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C5A43F5EC6C37DD1BD33AD85 /* BODragScrollDemo */,
+				830BC313867298FF7C1D0EDD /* BODragScrollDemoUITests */,
+				34173A72E751D2CFF35700AD /* BODragScrollLegacy */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2FA69701B34ED6C302B9A872 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE213031163A0041BAE74060 /* AppDelegate.swift in Sources */,
+				040D6436F4A811FF1D7F9C72 /* BasicScenarios.swift in Sources */,
+				988FEF42008528C8BDBF5FD2 /* DemoCatalogViewController.swift in Sources */,
+				55442BBF8E0245C54E9C168D /* DemoDataSources.swift in Sources */,
+				CEC22DDF07B6C66C07FD0B88 /* DemoDragEngine.swift in Sources */,
+				D514ED3E388B6DF17E12CF2E /* DemoPanelView.swift in Sources */,
+				D9B78815B75DE192190FA008 /* DemoScenario.swift in Sources */,
+				1089583760F938599CAFC704 /* DemoScenarioViewController.swift in Sources */,
+				4761DD71A24CA0759AF9BF6C /* DemoTheme.swift in Sources */,
+				E9A127962FE3F599A171CDA2 /* DemoTraceRecorder.swift in Sources */,
+				C5D314DA0BB222A36328F8FA /* LegacyDemoDragEngine.swift in Sources */,
+				E9981EF75DB79506C3E17839 /* PolicyLabViewController.swift in Sources */,
+				9D3BC2240659E923A6059EF2 /* ScrollingScenarios.swift in Sources */,
+				D56CD9BC32C97A756BE3BDB4 /* SwiftDemoDragEngine.swift in Sources */,
+				390D1624CD0E838732E35F3B /* SystemIntegrationScenarios.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9D0C24DF0B619DDC4B99240A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				36C13572AE46F59C90F33D5C /* BODemoLegacyDragHost.m in Sources */,
+				54CFF59743E573B348D10192 /* BODragScrollView.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B32C130C30389C473B60FC00 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				91CDB3EFD8B81ED75A8F461D /* BODragScrollDemoSmokeUITests.swift in Sources */,
+				3B0E87238AEE00256A9A639A /* DemoUITestSupport.swift in Sources */,
+				E6FBCBB42996982E84E9750E /* FreePanelBoundaryUITests.swift in Sources */,
+				85FE841E5CB8C9095898FC21 /* MovementHandoffParityUITests.swift in Sources */,
+				E0D1E516D5FCE9E3861A4F7D /* NestedExplicitParityUITests.swift in Sources */,
+				48CD573AF5824B0EE120D480 /* PolicyParityUITests.swift in Sources */,
+				8AEA0FA2D1CF1F104334C424 /* ViewportSafetyParityUITests.swift in Sources */,
+				FF052FEC9C380E89D6621853 /* WebControlsParityUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		85ACF647E68F9CC724E0F52D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 34173A72E751D2CFF35700AD /* BODragScrollLegacy */;
+			targetProxy = BB05F5C49DCFF1918C6C1358 /* PBXContainerItemProxy */;
+		};
+		DD729B6C3066C857B294BC7C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C5A43F5EC6C37DD1BD33AD85 /* BODragScrollDemo */;
+			targetProxy = B0F9836EC4FACEC3A38A7D9B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		22029E21C6317C3948E0B04F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chbo297.BODragScrollLegacy;
+				PRODUCT_MODULE_NAME = BODragScrollLegacy;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
+		};
+		2D5169BECBFB2A71D57DA17D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8ED2N2GBR7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "BODragScroll Demo";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chbo297.BODragScrollDemo;
+				PRODUCT_NAME = BODragScrollDemo;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		4F53A09CF77BA2FD5256AF3D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8ED2N2GBR7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "BODragScroll Demo";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chbo297.BODragScrollDemo;
+				PRODUCT_NAME = BODragScrollDemo;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		58C4279A9A58F7E91863C35D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		8611141D3DCE70497AC64710 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chbo297.BODragScrollDemoUITests;
+				PRODUCT_NAME = BODragScrollDemoUITests;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = BODragScrollDemo;
+			};
+			name = Release;
+		};
+		A852DD21055126158C9B4371 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chbo297.BODragScrollDemoUITests;
+				PRODUCT_NAME = BODragScrollDemoUITests;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = BODragScrollDemo;
+			};
+			name = Debug;
+		};
+		CC0DBA145ED9F5A2AAC67CF9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chbo297.BODragScrollLegacy;
+				PRODUCT_MODULE_NAME = BODragScrollLegacy;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		F82162AC671BF06D8EE1C540 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0B2E972333B02F335E841737 /* Build configuration list for PBXNativeTarget "BODragScrollLegacy" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				22029E21C6317C3948E0B04F /* Debug */,
+				CC0DBA145ED9F5A2AAC67CF9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		0C0823F23D3CE22E6517E197 /* Build configuration list for PBXNativeTarget "BODragScrollDemoUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A852DD21055126158C9B4371 /* Debug */,
+				8611141D3DCE70497AC64710 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		69BC73B9030FDEA5B78E1589 /* Build configuration list for PBXProject "BODragScrollDemo" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F82162AC671BF06D8EE1C540 /* Debug */,
+				58C4279A9A58F7E91863C35D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EA2AA8EACA766F643FB8B151 /* Build configuration list for PBXNativeTarget "BODragScrollDemo" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4F53A09CF77BA2FD5256AF3D /* Debug */,
+				2D5169BECBFB2A71D57DA17D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		FEFA1AF88B65CB44F4B9FB0F /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D09D8FDD3D8E93853D5DD5CE /* BODragScroll */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BODragScroll;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 7F0DD2B31BBF0453F1EA4628 /* Project object */;
+}

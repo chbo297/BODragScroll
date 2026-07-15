@@ -23,6 +23,12 @@ CocoaPods：
 pod "BODragScroll"
 ```
 
+## Demo 与新旧实现对比
+
+用 Xcode 打开 `Demo/BODragScrollDemo.xcodeproj`。目录提供 9 个场景，覆盖自由面板、吸附与程序化移动、默认智能交接边界、列表交接、多层滚动链、显式内部区间、策略与回弹、WebKit、UIControl、横向手势和辅助功能。
+
+每个功能页右上角都可通过 OC / Swift 分段标签在 Swift 重写版与原 Objective-C 实现之间重建切换；业务选项会保留，展示高度、内容 offset、捕获会话和运行中的动画会重置，便于从同一初始状态重复 A/B。Demo 中的 OC `.h/.m` 是源仓库原文件的逐字节副本，只通过独立临时 Framework 和中立适配层接入；原实现的 `+load` swizzle 仍是进程级行为，因此这里用于功能对齐，不代表两个完全隔离进程的性能对照。
+
 ## 基本使用
 
 ```swift
@@ -100,6 +106,8 @@ dragScrollView.behaviorProvider = behavior
 ```
 
 协议具有默认实现，只需实现需要接管的决策。`behaviorProvider` 只负责同步决策；`eventDelegate` 只负责事件通知，避免一个 delegate 同时承担输入和输出。
+
+如果 panel 尺寸依赖安全区或其它外部状态，而 `BODragScrollView.bounds` 本身没有变化，在该状态变化后调用 `invalidatePanelLayout()`；组件会按 presentation 状态保存当前可见高度、中断旧移动并重新执行 sizing provider。
 
 ## 移动与完成语义
 

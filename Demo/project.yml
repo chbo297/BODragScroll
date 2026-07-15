@@ -1,0 +1,87 @@
+name: BODragScrollDemo
+
+options:
+  deploymentTarget:
+    iOS: "13.0"
+  createIntermediateGroups: true
+
+packages:
+  BODragScroll:
+    path: ..
+
+targets:
+  BODragScrollLegacy:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Legacy/BODragScrollLegacy.h
+        headerVisibility: public
+      - path: Legacy/BODemoLegacyDragHost.h
+        headerVisibility: public
+      - path: Legacy/BODemoLegacyDragHost.m
+      - path: Legacy/Original/BODragScrollView.h
+        headerVisibility: project
+      - path: Legacy/Original/BODragScrollView.m
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chbo297.BODragScrollLegacy
+        PRODUCT_MODULE_NAME: BODragScrollLegacy
+        DEFINES_MODULE: YES
+        CLANG_ENABLE_MODULES: YES
+        CLANG_ENABLE_OBJC_ARC: YES
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  BODragScrollDemo:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: BODragScroll
+        product: BODragScroll
+      - target: BODragScrollLegacy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chbo297.BODragScrollDemo
+        PRODUCT_NAME: BODragScrollDemo
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: BODragScroll Demo
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SUPPORTS_MACCATALYST: NO
+
+  BODragScrollDemoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: BODragScrollDemo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chbo297.BODragScrollDemoUITests
+        PRODUCT_NAME: BODragScrollDemoUITests
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: BODragScrollDemo
+        SUPPORTS_MACCATALYST: NO
+
+schemes:
+  BODragScrollDemo:
+    build:
+      targets:
+        BODragScrollDemo: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - BODragScrollDemoUITests
