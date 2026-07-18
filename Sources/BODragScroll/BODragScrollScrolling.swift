@@ -52,6 +52,7 @@ extension BODragScrollView {
 
         let source: BODragScrollMotionSource
         let newDisplayHeight: CGFloat
+        let overscroll: BODragScrollOverscrollState?
         if let session = runtime.capture.session,
            let model = session.model,
            captureSessionIsCurrentAndHierarchyValid(session) {
@@ -66,6 +67,16 @@ extension BODragScrollView {
                   runtime.scrolling.callbackEpoch == callbackEpoch,
                   panelView === panelAtStart,
                   ensureCaptureSessionIsCurrentAndHierarchyValid(session) else { return }
+            if let correctedOuterOffsetY = projected.correctedOuterOffsetY {
+                var correctedOffset = contentOffset
+                correctedOffset.y = correctedOuterOffsetY
+                withInternalMutation { setContentOffsetIfNeeded(correctedOffset) }
+                guard runtime.capture.session === session,
+                      runtime.capture.operationEpoch == captureOperationEpoch,
+                      runtime.scrolling.callbackEpoch == callbackEpoch,
+                      panelView === panelAtStart,
+                      ensureCaptureSessionIsCurrentAndHierarchyValid(session) else { return }
+            }
             apply(projected.projection, panelTranslation: projected.panelTranslation, session: session)
             guard runtime.capture.session === session,
                   runtime.capture.operationEpoch == captureOperationEpoch,
@@ -77,11 +88,13 @@ extension BODragScrollView {
                 return
             }
             source = motionSource(for: projected.projection, session: session)
-            newDisplayHeight = bounds.height - ((panelView?.frame.minY ?? 0) - contentOffset.y)
+            newDisplayHeight = displayHeightForCurrentGeometry
+            overscroll = projected.overscroll
         } else {
             applyPanelOnlyBounceConstraints()
             source = .panel
             newDisplayHeight = displayHeightForCurrentGeometry
+            overscroll = hostOverscrollState(fallbackOwner: .panel)
         }
 
         if nativeScrollState.isTracking {
@@ -100,6 +113,8 @@ extension BODragScrollView {
               runtime.capture.operationEpoch == captureEpochAtStart,
               panelView === panelAtStart,
               ensureCaptureHierarchyStateMatches(captureSessionAtStart) else { return }
+
+        runtime.scrolling.overscroll = overscroll
 
         if !(isPerformingViewTransition && configuration.movement.defersDisplayHeightUpdates) {
             setDisplayHeight(newDisplayHeight, source: source)
@@ -121,6 +136,118 @@ extension BODragScrollView {
     }
 }
 
+// MARK: - Deferred participant-metrics reconciliation
+
+@MainActor
+extension BODragScrollView {
+    /// UIKit may synchronously clamp a participant offset when its content size shrinks, before the
+    /// metrics KVO callback reaches the host. While a physical lifecycle still owns its touch-down
+    /// model, restore only that participant from the model's projection at the unchanged host
+    /// offset. This is not a rebuild or second physics path, and it does not rewrite the panel or
+    /// unrelated participants.
+    func restoreProjectionAfterDeferredParticipantMetricsChange(
+        for participantID: ParticipantID,
+        scrollView: UIScrollView,
+        in session: BODragScrollCaptureSession
+    ) {
+        guard runtime.capture.session === session,
+              captureSessionIsCurrentAndHierarchyValid(session),
+              session.participant(with: participantID)?.scrollView === scrollView,
+              let model = session.model else { return }
+        let captureOperationEpoch = runtime.capture.operationEpoch
+        let scrollingCallbackEpoch = runtime.scrolling.callbackEpoch
+        let panelAtStart = panelView
+        let projected = projectedState(
+            at: contentOffset.y,
+            model: model,
+            session: session
+        )
+        guard let participantProjection = projected.projection.participantOffsets.first(where: {
+            $0.participantID == participantID
+        }) else { return }
+        guard runtime.capture.session === session,
+              runtime.capture.operationEpoch == captureOperationEpoch,
+              runtime.scrolling.callbackEpoch == scrollingCallbackEpoch,
+              panelView === panelAtStart,
+              captureSessionIsCurrentAndHierarchyValid(session) else { return }
+        var restoredOffset = scrollView.contentOffset
+        restoredOffset.y = participantProjection.contentOffset
+        // This setter can call client code; deliberately perform no host/session writes afterward.
+        scrollView.setContentOffsetIfNeeded(restoredOffset)
+    }
+}
+
+// MARK: - Host overscroll snapshot
+
+@MainActor
+extension BODragScrollView {
+    /// Returns the host's current legal-axis extension without changing UIKit geometry.
+    /// Arithmetic residue at a known endpoint is canonicalized only for this decision; the host's
+    /// real contentOffset remains untouched.
+    func hostOverscrollState(
+        fallbackOwner: SegmentOwner? = nil
+    ) -> BODragScrollOverscrollState? {
+        let minimum = minimumOuterOffset
+        let maximum = maximumOuterOffset
+        guard minimum.isFinite, maximum.isFinite, contentOffset.y.isFinite else { return nil }
+        let normalizedOffset = comparisonPolicy.snappingToNearestEndpoint(
+            contentOffset.y,
+            minimum,
+            maximum
+        )
+
+        let edge: BODragScrollOverscrollEdge
+        let boundary: CGFloat
+        let distance: CGFloat
+        if normalizedOffset < minimum {
+            edge = .top
+            boundary = minimum
+            distance = minimum - normalizedOffset
+        } else if normalizedOffset > maximum {
+            edge = .bottom
+            boundary = maximum
+            distance = normalizedOffset - maximum
+        } else {
+            return nil
+        }
+
+        let cachedOwner = runtime.scrolling.overscroll.flatMap { cached -> SegmentOwner? in
+            cached.edge == edge ? cached.owner : nil
+        }
+        let owner = cachedOwner ?? fallbackOwner ?? configuredOverscrollOwner(for: edge)
+        return BODragScrollOverscrollState(
+            edge: edge,
+            owner: owner,
+            boundaryOffset: boundary,
+            distance: distance
+        )
+    }
+
+    private func configuredOverscrollOwner(
+        for edge: BODragScrollOverscrollEdge
+    ) -> SegmentOwner {
+        guard let participant = runtime.capture.session?.primaryParticipant,
+              let scrollView = participant.scrollView,
+              scrollView.bounces else {
+            return .panel
+        }
+
+        switch edge {
+        case .top:
+            if configuration.bounce.forcesInnerTopBounce {
+                return .participant(participant.id)
+            }
+            let panelOwns = configuration.bounce.allowsPanelTopBounce
+                && configuration.bounce.preferredTopOwner == .panel
+            return panelOwns ? .panel : .participant(participant.id)
+        case .bottom:
+            let panelOwns = configuration.bounce.allowsPanelBottomBounce
+                && configuration.bounce.preferredBottomOwner == .panel
+            return panelOwns ? .panel : .participant(participant.id)
+        }
+    }
+}
+
 // MARK: - Projection and bounce allocation
 
 @MainActor
@@ -128,6 +255,10 @@ private extension BODragScrollView {
     struct ProjectedScrollState {
         var projection: Projection
         var panelTranslation: CGFloat
+        var overscroll: BODragScrollOverscrollState?
+        /// A clamp request for the host's ordinary did-scroll owner. Keeping it as data makes model
+        /// projection reusable by metrics reconciliation without hidden host writes.
+        var correctedOuterOffsetY: CGFloat? = nil
     }
 
     func projectedState(
@@ -141,7 +272,8 @@ private extension BODragScrollView {
             let projection = model.projection(at: outerOffset)
             return ProjectedScrollState(
                 projection: projection,
-                panelTranslation: projection.panelTranslation
+                panelTranslation: projection.panelTranslation,
+                overscroll: hostOverscrollState(fallbackOwner: .panel)
             )
         }
 
@@ -155,14 +287,14 @@ private extension BODragScrollView {
                 prefersPanel = false
             }
             if !prefersPanel, !primary.bounces {
-                var clampedOffset = contentOffset
-                clampedOffset.y = minimum
-                withInternalMutation { setContentOffsetIfNeeded(clampedOffset) }
                 return ProjectedScrollState(
                     projection: base,
-                    panelTranslation: panelTranslation
+                    panelTranslation: panelTranslation,
+                    overscroll: nil,
+                    correctedOuterOffsetY: minimum
                 )
             }
+            let owner: SegmentOwner
             if !prefersPanel,
                let primaryID = session.primaryParticipant?.id,
                let index = base.participantOffsets.firstIndex(where: {
@@ -179,12 +311,39 @@ private extension BODragScrollView {
                     outerOffset: outerOffset,
                     panelTranslation: panelTranslation,
                     displayHeight: base.displayHeight,
+                    fixedDisplayHeight: base.fixedDisplayHeight,
                     activeOwner: .participant(primaryID),
                     isParticipantScrolling: true,
                     participantOffsets: offsets
                 )
+                owner = .participant(primaryID)
+            } else {
+                owner = .panel
             }
-            return ProjectedScrollState(projection: base, panelTranslation: panelTranslation)
+            if prefersPanel {
+                // Panel-owned bounce is outside the normal inner segment. It must not inherit the
+                // boundary segment's fixed-height correction target, otherwise the first sub-pixel
+                // part of the panel bounce would be pulled back to the inner height and then jump.
+                base = Projection(
+                    outerOffset: outerOffset,
+                    panelTranslation: panelTranslation,
+                    displayHeight: base.displayHeight - extensionDistance,
+                    fixedDisplayHeight: nil,
+                    activeOwner: .panel,
+                    isParticipantScrolling: false,
+                    participantOffsets: base.participantOffsets
+                )
+            }
+            return ProjectedScrollState(
+                projection: base,
+                panelTranslation: panelTranslation,
+                overscroll: BODragScrollOverscrollState(
+                    edge: .top,
+                    owner: owner,
+                    boundaryOffset: minimum,
+                    distance: extensionDistance
+                )
+            )
         }
 
         if outerOffset > maximum {
@@ -194,14 +353,14 @@ private extension BODragScrollView {
             let prefersPanel = configuration.bounce.allowsPanelBottomBounce
                 && (configuration.bounce.preferredBottomOwner == .panel || !primary.bounces)
             if !prefersPanel, !primary.bounces {
-                var clampedOffset = contentOffset
-                clampedOffset.y = maximum
-                withInternalMutation { setContentOffsetIfNeeded(clampedOffset) }
                 return ProjectedScrollState(
                     projection: base,
-                    panelTranslation: panelTranslation
+                    panelTranslation: panelTranslation,
+                    overscroll: nil,
+                    correctedOuterOffsetY: maximum
                 )
             }
+            let owner: SegmentOwner
             if !prefersPanel,
                let primaryID = session.primaryParticipant?.id,
                let index = base.participantOffsets.firstIndex(where: {
@@ -218,18 +377,45 @@ private extension BODragScrollView {
                     outerOffset: outerOffset,
                     panelTranslation: panelTranslation,
                     displayHeight: base.displayHeight,
+                    fixedDisplayHeight: base.fixedDisplayHeight,
                     activeOwner: .participant(primaryID),
                     isParticipantScrolling: true,
                     participantOffsets: offsets
                 )
+                owner = .participant(primaryID)
+            } else {
+                owner = .panel
             }
-            return ProjectedScrollState(projection: base, panelTranslation: panelTranslation)
+            if prefersPanel {
+                // As at the top boundary, panel-owned overscroll changes the real display height;
+                // only inner-owned bounce may retain the participant segment's fixed height.
+                base = Projection(
+                    outerOffset: outerOffset,
+                    panelTranslation: panelTranslation,
+                    displayHeight: base.displayHeight + extensionDistance,
+                    fixedDisplayHeight: nil,
+                    activeOwner: .panel,
+                    isParticipantScrolling: false,
+                    participantOffsets: base.participantOffsets
+                )
+            }
+            return ProjectedScrollState(
+                projection: base,
+                panelTranslation: panelTranslation,
+                overscroll: BODragScrollOverscrollState(
+                    edge: .bottom,
+                    owner: owner,
+                    boundaryOffset: maximum,
+                    distance: extensionDistance
+                )
+            )
         }
 
         let projection = model.projection(at: outerOffset)
         return ProjectedScrollState(
             projection: projection,
-            panelTranslation: projection.panelTranslation
+            panelTranslation: projection.panelTranslation,
+            overscroll: nil
         )
     }
 
@@ -245,6 +431,9 @@ private extension BODragScrollView {
         // movement whose own `scrollViewDidScroll` must not be swallowed by this older projection.
         withInternalMutation {
             setPanelFrame(panelFrame)
+            if let fixedDisplayHeight = projection.fixedDisplayHeight {
+                correctDisplayHeightResidual(to: fixedDisplayHeight)
+            }
         }
         // Frame first, then participant offsets: some UIKit scroll subclasses correct their offset on layout.
         applyParticipantOffsets(projection, session: session)

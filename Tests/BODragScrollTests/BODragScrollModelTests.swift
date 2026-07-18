@@ -27,14 +27,18 @@ final class BODragScrollModelTests: XCTestCase {
         XCTAssertNotEqual(native.value, objectiveC.value)
     }
 
-    func testJitterAndPhysicalPixelAreDifferentAlgorithmBands() {
+    func testValueEqualityAndPhysicalPixelAreDifferentStrictBands() {
         let policy = ScrollComparisonPolicy(displayScale: 2)
 
-        XCTAssertTrue(policy.isJitterEqual(100, 100.005))
-        XCTAssertFalse(policy.isJitterEqual(100, 100.02))
+        XCTAssertTrue(policy.isValueEqual(0, ScrollComparisonPolicy.valueEqualityTolerance * 0.5))
+        XCTAssertFalse(policy.isValueEqual(0, ScrollComparisonPolicy.valueEqualityTolerance))
         XCTAssertEqual(policy.boundaryBand, 0.5)
-        XCTAssertTrue(policy.isWithinBoundaryBand(100, 100.5))
-        XCTAssertFalse(policy.isWithinBoundaryBand(100, 100.500_001))
+        XCTAssertTrue(policy.isWithinBoundaryBand(100, 100.499_999))
+        XCTAssertFalse(policy.isWithinBoundaryBand(100, 100.5))
+
+        XCTAssertEqual(policy.snappingToNearestEndpoint(-0.000_05, 0, 10), 0)
+        XCTAssertEqual(policy.snappingToNearestEndpoint(10.000_05, 0, 10), 10)
+        XCTAssertEqual(policy.snappingToNearestEndpoint(-0.25, 0, 10), -0.25)
     }
 
     func testBuilderMergesDetentWithParticipantSegmentAtSameDisplayHeight() throws {
@@ -182,6 +186,53 @@ final class BODragScrollModelTests: XCTestCase {
         XCTAssertEqual(insideDecisionBand.activeOwner, .participant(primary))
         XCTAssertFalse(insideDecisionBand.isParticipantScrolling)
         XCTAssertEqual(insideDecisionBand.offset(for: primary), -0.25)
+    }
+
+    func testProjectionSnapsOnlyArithmeticEndpointResidueAndKeepsPixelPreEntry() throws {
+        let model = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [.native(300)],
+                participantOrder: [primary],
+                participantSegments: [segment(primary, displayHeight: 300, start: 0, end: 100)]
+            )
+        )
+        let segment = try XCTUnwrap(model.segments.first)
+
+        let arithmeticResidue = model.projection(at: segment.outerStart - 0.000_05)
+        XCTAssertEqual(arithmeticResidue.offset(for: primary), segment.innerStart)
+        XCTAssertEqual(arithmeticResidue.fixedDisplayHeight, segment.displayHeight)
+        XCTAssertEqual(arithmeticResidue.displayHeight, segment.displayHeight)
+
+        let physicalPixelPreEntry = model.projection(at: segment.outerStart - 0.25)
+        XCTAssertEqual(physicalPixelPreEntry.offset(for: primary), segment.innerStart - 0.25)
+        XCTAssertNil(physicalPixelPreEntry.fixedDisplayHeight)
+        XCTAssertEqual(physicalPixelPreEntry.displayHeight, segment.displayHeight)
+    }
+
+    func testProjectionPublishesExactModelHeightInsideParticipantSegment() throws {
+        let authoritativeHeight: CGFloat = 321.123_456_789
+        let model = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 873,
+                displayScale: 3,
+                detents: [],
+                participantOrder: [primary],
+                participantSegments: [
+                    segment(primary, displayHeight: authoritativeHeight, start: 0, end: 2_000)
+                ]
+            )
+        )
+        let segment = try XCTUnwrap(model.segments.first)
+        let projection = model.projection(at: segment.outerStart + 777.777_777)
+
+        XCTAssertEqual(projection.fixedDisplayHeight, authoritativeHeight)
+        XCTAssertEqual(projection.displayHeight, authoritativeHeight)
+        XCTAssertEqual(
+            projection.panelTranslation,
+            model.viewportHeight + projection.outerOffset - authoritativeHeight
+        )
     }
 
     func testNestedBuilderClampsShortBouncingContentToAZeroLengthParticipant() throws {

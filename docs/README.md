@@ -17,6 +17,8 @@
 - 一次触摸会从最内层命中视图沿响应链捕获可参与的 `UIScrollView`，形成 `primary → ancestors` 的参与链。
 - detent、面板移动区间和所有参与者的内部滚动区间会被合成为一条连续的外部滚动轴。
 - 高频 `didScroll` 只投影已缓存的纯数学模型；抬手时由纯求解器决定是否吸附，再由 Transition 层执行目标。
+- `didScroll` 表达滚动事件并如实发布；`didChangeDisplayHeight` 表达高度值变化，二者不共用去重策略。
+- 回弹 owner 决定参与者固定高度是否继续有效；布局重建使用 transaction epoch 防止旧 layout 覆盖回调中新建的 movement，同时在新事务已结束时仍发布真实几何。
 
 ## 文档与代码一致性
 

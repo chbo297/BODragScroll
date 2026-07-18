@@ -35,6 +35,25 @@ private final class OffsetObservingScrollView: UIScrollView {
 }
 
 @MainActor
+private final class ContentOffsetRequestRecordingScrollView: UIScrollView {
+    struct Request {
+        let contentOffset: CGPoint
+        let animated: Bool
+    }
+
+    private(set) var requests: [Request] = []
+
+    override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
+        requests.append(Request(contentOffset: contentOffset, animated: animated))
+        super.setContentOffset(contentOffset, animated: animated)
+    }
+
+    func resetRequests() {
+        requests.removeAll()
+    }
+}
+
+@MainActor
 private final class GeometryObservingPanelView: UIView {
     var onFirstCenterChange: (() -> Void)?
     private var hasFired = false
@@ -71,6 +90,28 @@ private final class FixedPanelSizeProvider: BODragScrollBehaviorProvider {
 }
 
 @MainActor
+private final class LayoutDisplayHeightProvider: BODragScrollBehaviorProvider {
+    let targetDisplayHeight: CGFloat
+    var isArmed = false
+
+    init(targetDisplayHeight: CGFloat) {
+        self.targetDisplayHeight = targetDisplayHeight
+    }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        sizeFor panelView: UIView,
+        firstLayout: Bool,
+        proposedDisplayHeight: inout CGFloat
+    ) -> CGSize? {
+        if isArmed {
+            proposedDisplayHeight = targetDisplayHeight
+        }
+        return nil
+    }
+}
+
+@MainActor
 private final class CallbackPanelSizeProvider: BODragScrollBehaviorProvider {
     let size: CGSize
     var isArmed = false
@@ -97,6 +138,7 @@ private final class CallbackPanelSizeProvider: BODragScrollBehaviorProvider {
 
 @MainActor
 private final class ParticipantLifecycleSpy: NSObject, UIScrollViewDelegate {
+    var onWillBeginDragging: (() -> Void)?
     private(set) var began: [UIScrollView] = []
     private(set) var willEnd: [UIScrollView] = []
     private(set) var didEnd: [UIScrollView] = []
@@ -104,6 +146,7 @@ private final class ParticipantLifecycleSpy: NSObject, UIScrollViewDelegate {
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         began.append(scrollView)
+        onWillBeginDragging?()
     }
 
     func scrollViewWillEndDragging(
@@ -124,11 +167,46 @@ private final class ParticipantLifecycleSpy: NSObject, UIScrollViewDelegate {
 }
 
 @MainActor
+private final class ReentrantDragLifecycleEventDelegate: BODragScrollEventDelegate {
+    var onWillBeginDragging: (() -> Void)?
+    private(set) var willBeginDraggingCount = 0
+    private(set) var didEndDraggingValues: [Bool] = []
+
+    func dragScrollViewWillBeginDragging(_ dragScrollView: BODragScrollView) {
+        willBeginDraggingCount += 1
+        onWillBeginDragging?()
+    }
+
+    func dragScrollViewDidEndDragging(
+        _ dragScrollView: BODragScrollView,
+        willDecelerate: Bool
+    ) {
+        didEndDraggingValues.append(willDecelerate)
+    }
+}
+
+@MainActor
 private final class ReentrantParticipantLifecycleDelegate: NSObject, UIScrollViewDelegate {
     var onDidEndDragging: (() -> Void)?
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         onDidEndDragging?()
+    }
+}
+
+@MainActor
+private final class SyntheticDecelerationMutationDelegate: NSObject, UIScrollViewDelegate {
+    var onDidEndDecelerating: (() -> Void)?
+    private(set) var didEndDeceleratingCount = 0
+    private(set) var willBeginDraggingCount = 0
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        willBeginDraggingCount += 1
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        didEndDeceleratingCount += 1
+        onDidEndDecelerating?()
     }
 }
 
@@ -146,8 +224,13 @@ private final class AccessibilityPanelOnlyProvider: BODragScrollBehaviorProvider
 private final class ReentrantDecelerationDelegate: BODragScrollEventDelegate {
     var onDidEndDecelerating: (() -> Void)?
     var onDidFinishMovement: ((BODragScrollMovementResult) -> Void)?
+    private(set) var willBeginDraggingCount = 0
     private(set) var didEndDeceleratingCount = 0
     private(set) var results: [BODragScrollMovementResult] = []
+
+    func dragScrollViewWillBeginDragging(_ dragScrollView: BODragScrollView) {
+        willBeginDraggingCount += 1
+    }
 
     func dragScrollViewDidEndDecelerating(_ dragScrollView: BODragScrollView) {
         didEndDeceleratingCount += 1
@@ -190,6 +273,60 @@ private final class DisplayHeightCallbackDelegate: BODragScrollEventDelegate {
 }
 
 @MainActor
+private final class MovementEventRecorder: BODragScrollEventDelegate {
+    private(set) var changedDisplayHeights: [CGFloat] = []
+    private(set) var scrollUpdates: [BODragScrollUpdate] = []
+    private(set) var announcedDisplayHeights: [CGFloat] = []
+    private(set) var results: [BODragScrollMovementResult] = []
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        didChangeDisplayHeight displayHeight: CGFloat
+    ) {
+        changedDisplayHeights.append(displayHeight)
+    }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        didScroll update: BODragScrollUpdate
+    ) {
+        scrollUpdates.append(update)
+    }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        willMoveToDisplayHeight displayHeight: CGFloat,
+        reason: BODragScrollMovementReason
+    ) {
+        announcedDisplayHeights.append(displayHeight)
+    }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        didFinishMovement result: BODragScrollMovementResult
+    ) {
+        results.append(result)
+    }
+}
+
+@MainActor
+private final class TargetOffsetAdjustmentProvider: BODragScrollBehaviorProvider {
+    let deltaY: CGFloat
+
+    init(deltaY: CGFloat) {
+        self.deltaY = deltaY
+    }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        adjustTargetContentOffset targetContentOffset: inout CGPoint,
+        velocity: CGPoint
+    ) {
+        targetContentOffset.y += deltaY
+    }
+}
+
+@MainActor
 private final class SegmentProvider: BODragScrollBehaviorProvider {
     let segments: [BODragScrollInnerScrollSegment]
 
@@ -220,6 +357,21 @@ private final class ReentrantMovementStyleProvider: BODragScrollBehaviorProvider
             dragScrollView.move(toDisplayHeight: 180, animated: false)
         }
         return .viewAnimation
+    }
+}
+
+@MainActor
+private final class MovementStyleCallRecorder: BODragScrollBehaviorProvider {
+    private(set) var callCount = 0
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        movementStyleFrom fromDisplayHeight: CGFloat,
+        to toDisplayHeight: CGFloat,
+        reason: BODragScrollMovementReason
+    ) -> BODragScrollMovementStyle {
+        callCount += 1
+        return .systemScroll
     }
 }
 
@@ -403,6 +555,164 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         // A late UIKit lifecycle callback must not finish an already-completed intention again.
         dragScrollView.scrollViewDidEndScrollingAnimation(dragScrollView)
         XCTAssertEqual(results.count, 1)
+    }
+
+    func testDisplayHeightStoresEveryRealValueButValueChangeCallbackUsesCumulativeBaseline() {
+        let (dragScrollView, _) = makeHost()
+        let recorder = MovementEventRecorder()
+        dragScrollView.eventDelegate = recorder
+        let baseline = dragScrollView.displayHeight
+
+        dragScrollView.setDisplayHeight(baseline + 0.000_05, source: .panel)
+
+        XCTAssertEqual(dragScrollView.displayHeight, baseline + 0.000_05)
+        XCTAssertTrue(recorder.changedDisplayHeights.isEmpty)
+
+        dragScrollView.setDisplayHeight(baseline + 0.000_15, source: .panel)
+
+        XCTAssertEqual(dragScrollView.displayHeight, baseline + 0.000_15)
+        XCTAssertEqual(recorder.changedDisplayHeights, [baseline + 0.000_15])
+
+        let scrollCountBefore = recorder.scrollUpdates.count
+        dragScrollView.scrollViewDidScroll(dragScrollView)
+        dragScrollView.scrollViewDidScroll(dragScrollView)
+        XCTAssertEqual(recorder.scrollUpdates.count - scrollCountBefore, 2)
+    }
+
+    func testSameHeightDragReleaseStillPublishesMovementIntentAndCompletion() {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let recorder = MovementEventRecorder()
+        dragScrollView.eventDelegate = recorder
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        var target = dragScrollView.contentOffset
+
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: .zero,
+            targetContentOffset: &target
+        )
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+
+        XCTAssertEqual(recorder.announcedDisplayHeights, [dragScrollView.displayHeight])
+        XCTAssertEqual(recorder.results.count, 1)
+        XCTAssertEqual(recorder.results.first?.reason, .dragRelease)
+        XCTAssertEqual(recorder.results.first?.outcome, .completed)
+    }
+
+    func testExternalTargetAdjustmentSmallerThanValueToleranceRemainsAuthoritative() {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let provider = TargetOffsetAdjustmentProvider(deltaY: 0.000_05)
+        let recorder = MovementEventRecorder()
+        dragScrollView.behaviorProvider = provider
+        _ = dragScrollView.move(toDisplayHeight: 180, animated: false)
+        dragScrollView.eventDelegate = recorder
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        var target = CGPoint(x: 0, y: 300 - dragScrollView.bounds.height)
+
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: CGPoint(x: 0, y: 3),
+            targetContentOffset: &target
+        )
+
+        XCTAssertEqual(target.y, 300 - dragScrollView.bounds.height + 0.000_05)
+        XCTAssertEqual(recorder.announcedDisplayHeights, [300.000_05])
+        XCTAssertNotEqual(recorder.announcedDisplayHeights.first, 300)
+
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: true)
+        dragScrollView.interruptActiveMovement(outcome: .interrupted)
+    }
+
+    func testNoScrollAnimatedTargetCorrectsOnlyPanelFrameResidual() {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 200, 300])
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        var residualFrame = panelView.frame
+        residualFrame.origin.y += 0.000_01
+        dragScrollView.setPanelFrame(residualFrame)
+        XCTAssertNotEqual(dragScrollView.displayHeightForCurrentGeometry, 300)
+        var results: [BODragScrollMovementResult] = []
+
+        let resolved = dragScrollView.move(
+            toDisplayHeight: 300,
+            animated: true,
+            options: BODragScrollMovementOptions(style: .systemScroll)
+        ) { results.append($0) }
+
+        XCTAssertEqual(resolved, 300)
+        XCTAssertEqual(dragScrollView.contentOffset.y, 300 - dragScrollView.bounds.height)
+        XCTAssertEqual(dragScrollView.displayHeightForCurrentGeometry, 300)
+        XCTAssertEqual(dragScrollView.displayHeight, 300)
+        XCTAssertEqual(results.map(\.finalDisplayHeight), [300])
+
+        let styleRecorder = MovementStyleCallRecorder()
+        dragScrollView.behaviorProvider = styleRecorder
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: true)
+        XCTAssertEqual(styleRecorder.callCount, 0)
+    }
+
+    func testNoScrollNonSystemMovementsDoNotApplyNaturalScrollResidualCorrection() {
+        do {
+            let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+            let window = attachToWindow(dragScrollView)
+            defer { window.isHidden = true }
+            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            var residualFrame = panelView.frame
+            residualFrame.origin.y += 0.000_01
+            dragScrollView.setPanelFrame(residualFrame)
+            let residualHeight = dragScrollView.displayHeightForCurrentGeometry
+
+            _ = dragScrollView.move(
+                toDisplayHeight: 300,
+                animated: true,
+                options: BODragScrollMovementOptions(style: .viewAnimation)
+            )
+
+            XCTAssertEqual(
+                dragScrollView.displayHeightForCurrentGeometry,
+                residualHeight,
+                accuracy: 0.000_000_001
+            )
+            XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        }
+
+        do {
+            let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            var residualFrame = panelView.frame
+            residualFrame.origin.y += 0.000_01
+            dragScrollView.setPanelFrame(residualFrame)
+            let residualHeight = dragScrollView.displayHeightForCurrentGeometry
+
+            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+
+            XCTAssertEqual(
+                dragScrollView.displayHeightForCurrentGeometry,
+                residualHeight,
+                accuracy: 0.000_000_001
+            )
+            XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        }
+    }
+
+    func testSettleWithoutDetentsIsANoOpWithoutMovementEvents() {
+        let (dragScrollView, _) = makeHost()
+        let recorder = MovementEventRecorder()
+        dragScrollView.eventDelegate = recorder
+        var completionCount = 0
+        let originalOffset = dragScrollView.contentOffset
+
+        let result = dragScrollView.settleToNearestDetent(animated: false) { _ in
+            completionCount += 1
+        }
+
+        XCTAssertEqual(result, dragScrollView.displayHeight)
+        XCTAssertEqual(dragScrollView.contentOffset, originalOffset)
+        XCTAssertTrue(recorder.announcedDisplayHeights.isEmpty)
+        XCTAssertTrue(recorder.results.isEmpty)
+        XCTAssertEqual(completionCount, 0)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
     }
 
     func testNewMovementInterruptsPendingMovementAndEachCompletionFiresOnce() {
@@ -619,6 +929,266 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
     }
 
+    func testViewAnimationDragReleaseUsesItsActualNondeceleratingLifecycle() {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let lifecycle = ReentrantDragLifecycleEventDelegate()
+        defer {
+            dragScrollView.eventDelegate = nil
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            window.isHidden = true
+        }
+        var configuration = dragScrollView.configuration
+        configuration.movement.defaultStyle = .viewAnimation
+        configuration.movement.baseDuration = 1
+        configuration.movement.maximumDuration = 1
+        dragScrollView.configuration = configuration
+        dragScrollView.eventDelegate = lifecycle
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        let offsetBeforeRelease = dragScrollView.contentOffset
+        var target = CGPoint(
+            x: dragScrollView.contentOffset.x,
+            y: 300 - dragScrollView.bounds.height
+        )
+
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: CGPoint(x: 0, y: 1),
+            targetContentOffset: &target
+        )
+
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .viewAnimation)
+        XCTAssertEqual(target, offsetBeforeRelease)
+
+        // UIKit's predicted flag is stale after BODragScroll pins its target and replaces native
+        // deceleration with a view animation. Public lifecycle must describe the actual owner.
+        dragScrollView.scrollViewDidEndDragging(
+            dragScrollView,
+            willDecelerate: true
+        )
+
+        XCTAssertFalse(dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertFalse(dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .viewAnimation)
+        XCTAssertEqual(lifecycle.willBeginDraggingCount, 1)
+        XCTAssertEqual(lifecycle.didEndDraggingValues, [false])
+    }
+
+    func testViewAnimationDragReleaseDoesNotCreateFalseMetricsInvalidation() async throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 200, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        var configuration = dragScrollView.configuration
+        configuration.movement.defaultStyle = .viewAnimation
+        configuration.movement.baseDuration = 0.01
+        configuration.movement.maximumDuration = 0.01
+        dragScrollView.configuration = configuration
+        layout(dragScrollView)
+        dragScrollView.beginCapture(from: leafView)
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        _ = try XCTUnwrap(session.model)
+        let events = ReentrantDecelerationDelegate()
+        let completed = expectation(description: "view-animation drag release completed")
+        events.onDidFinishMovement = { result in
+            guard result.reason == .dragRelease else { return }
+            completed.fulfill()
+        }
+        dragScrollView.eventDelegate = events
+        defer {
+            dragScrollView.eventDelegate = nil
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            dragScrollView.endCapture()
+            window.isHidden = true
+            _ = provider
+        }
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        var target = CGPoint(
+            x: dragScrollView.contentOffset.x,
+            y: 200 - dragScrollView.bounds.height
+        )
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: CGPoint(x: 0, y: 1),
+            targetContentOffset: &target
+        )
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .viewAnimation)
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+
+        await fulfillment(of: [completed], timeout: 1)
+
+        XCTAssertFalse(session.hasDeferredMetricsChange)
+        XCTAssertEqual(events.results.map(\.outcome), [.completed])
+        XCTAssertNil(dragScrollView.runtime.capture.session)
+    }
+
+    func testViewAnimationCompletionDuringTrackingKeepsCaptureForRealDrag() async throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 200, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        var configuration = dragScrollView.configuration
+        configuration.movement.defaultStyle = .viewAnimation
+        configuration.movement.baseDuration = 0.03
+        configuration.movement.maximumDuration = 0.03
+        dragScrollView.configuration = configuration
+        layout(dragScrollView)
+        dragScrollView.beginCapture(from: leafView)
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let events = ReentrantDecelerationDelegate()
+        let completed = expectation(description: "view animation completed under tracking touch")
+        events.onDidFinishMovement = { result in
+            guard result.reason == .dragRelease else { return }
+            completed.fulfill()
+        }
+        dragScrollView.eventDelegate = events
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard dragScrollView.responds(to: trackingDidBegin),
+              dragScrollView.responds(to: trackingDidEnd) else {
+            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
+            return
+        }
+        defer {
+            if dragScrollView.nativeScrollState.isTracking {
+                dragScrollView.perform(trackingDidEnd)
+            }
+            if dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                dragScrollView.scrollViewDidEndDragging(
+                    dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            dragScrollView.endCapture()
+            dragScrollView.eventDelegate = nil
+            window.isHidden = true
+            _ = provider
+        }
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        var target = CGPoint(
+            x: dragScrollView.contentOffset.x,
+            y: 200 - dragScrollView.bounds.height
+        )
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: CGPoint(x: 0, y: 1),
+            targetContentOffset: &target
+        )
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+
+        dragScrollView.perform(trackingDidBegin)
+        dragScrollView.beginCapture(from: leafView)
+        await fulfillment(of: [completed], timeout: 1)
+
+        XCTAssertTrue(dragScrollView.nativeScrollState.isTracking)
+        XCTAssertTrue(dragScrollView.runtime.capture.session === session)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+
+        XCTAssertTrue(dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertTrue(dragScrollView.runtime.capture.session === session)
+    }
+
+    func testNewDragInterruptingViewAnimationDoesNotCreateFalseMetricsInvalidation() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 200, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        var configuration = dragScrollView.configuration
+        configuration.movement.defaultStyle = .viewAnimation
+        configuration.movement.baseDuration = 1
+        configuration.movement.maximumDuration = 1
+        dragScrollView.configuration = configuration
+        layout(dragScrollView)
+        dragScrollView.beginCapture(from: leafView)
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        defer {
+            if dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                dragScrollView.scrollViewDidEndDragging(
+                    dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            dragScrollView.endCapture()
+            window.isHidden = true
+            _ = provider
+        }
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        var target = CGPoint(
+            x: dragScrollView.contentOffset.x,
+            y: 200 - dragScrollView.bounds.height
+        )
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: CGPoint(x: 0, y: 1),
+            targetContentOffset: &target
+        )
+        dragScrollView.scrollViewDidEndDragging(
+            dragScrollView,
+            willDecelerate: false
+        )
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .viewAnimation)
+
+        // Touch-down retains the immutable model while the old animation still owns physics. The
+        // real drag then interrupts that animation without pretending participant metrics changed.
+        dragScrollView.beginCapture(from: leafView)
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+
+        XCTAssertTrue(dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(session.model, model)
+        XCTAssertFalse(session.hasDeferredMetricsChange)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertTrue(dragScrollView.runtime.transition.isUserDragLifecycleActive)
+    }
+
     func testDidEndDeceleratingCannotFinishAReentrantNewMovement() throws {
         let (dragScrollView, _) = makeHost(detents: [100, 300])
         let delegate = ReentrantDecelerationDelegate()
@@ -764,12 +1334,276 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         dragScrollView.interruptActiveMovement(outcome: .interrupted)
     }
 
-    func testStaleSystemAnimationEndCallbackCannotFinishReplacement() {
+    func testDecelerationWithoutReleaseTransactionClearsDriverAtNaturalEnd() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+        defer {
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            dragScrollView.endCapture()
+            window.isHidden = true
+        }
+
+        // UIKit may omit will-end for an interrupted/cancelled gesture. did-end still reports real
+        // deceleration, so the driver exists without a drag-release movement transaction.
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.scrollViewDidEndDragging(
+            dragScrollView,
+            willDecelerate: true
+        )
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertTrue(dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
+
+        XCTAssertFalse(dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertNil(dragScrollView.runtime.capture.session)
+    }
+
+    func testWindowRemovalClearsDecelerationWithoutReleaseTransaction() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+        defer { window.isHidden = true }
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.scrollViewDidEndDragging(
+            dragScrollView,
+            willDecelerate: true
+        )
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .dragDeceleration)
+
+        dragScrollView.removeFromSuperview()
+
+        XCTAssertNil(dragScrollView.window)
+        XCTAssertFalse(dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertNil(dragScrollView.runtime.capture.session)
+        XCTAssertNil(dragScrollView.runtime.transition.captureCleanupOwnership)
+    }
+
+    func testTransactionlessDecelerationEndDuringTrackingKeepsCaptureForNewDrag() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard dragScrollView.responds(to: trackingDidBegin),
+              dragScrollView.responds(to: trackingDidEnd) else {
+            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
+            return
+        }
+        defer {
+            if dragScrollView.nativeScrollState.isTracking {
+                dragScrollView.perform(trackingDidEnd)
+            }
+            if dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                dragScrollView.scrollViewDidEndDragging(
+                    dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            dragScrollView.endCapture()
+            window.isHidden = true
+        }
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.scrollViewDidEndDragging(
+            dragScrollView,
+            willDecelerate: true
+        )
+        dragScrollView.perform(trackingDidBegin)
+        dragScrollView.beginCapture(from: leafView)
+        let refreshedSession = try XCTUnwrap(dragScrollView.runtime.capture.session)
+
+        // The old deceleration ends under the new finger. Its driver is terminal, but capture must
+        // survive until the touch either lifts or becomes a real drag.
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertTrue(dragScrollView.runtime.capture.session === refreshedSession)
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+
+        XCTAssertTrue(dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertTrue(dragScrollView.runtime.capture.session === refreshedSession)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+    }
+
+    func testDecelerationTouchOnSiblingDefersAxisSwapUntilRealDrag() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let firstParticipant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 160, height: 300),
+            contentHeight: 900
+        )
+        let secondParticipant = makeScrollView(
+            frame: CGRect(x: 160, y: 0, width: 160, height: 300),
+            contentHeight: 900
+        )
+        let firstLeaf = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        let secondLeaf = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        firstParticipant.addSubview(firstLeaf)
+        secondParticipant.addSubview(secondLeaf)
+        panelView.addSubview(firstParticipant)
+        panelView.addSubview(secondParticipant)
+        dragScrollView.beginCapture(from: firstLeaf)
+        let firstSession = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let firstModel = try XCTUnwrap(firstSession.model)
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard dragScrollView.responds(to: trackingDidBegin),
+              dragScrollView.responds(to: trackingDidEnd) else {
+            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
+            return
+        }
+        defer {
+            if dragScrollView.nativeScrollState.isTracking {
+                dragScrollView.perform(trackingDidEnd)
+            }
+            if dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                dragScrollView.scrollViewDidEndDragging(
+                    dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            dragScrollView.endCapture()
+            window.isHidden = true
+        }
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.scrollViewDidEndDragging(
+            dragScrollView,
+            willDecelerate: true
+        )
+        dragScrollView.perform(trackingDidBegin)
+
+        dragScrollView.beginCapture(from: secondLeaf)
+
+        XCTAssertTrue(dragScrollView.runtime.capture.session === firstSession)
+        XCTAssertEqual(firstSession.model, firstModel)
+        XCTAssertTrue(dragScrollView.primaryParticipantScrollView === firstParticipant)
+        XCTAssertTrue(
+            dragScrollView.runtime.capture.deferredTouchViewForFreshCapture === secondLeaf
+        )
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+
+        let secondSession = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        XCTAssertFalse(secondSession === firstSession)
+        XCTAssertTrue(dragScrollView.primaryParticipantScrollView === secondParticipant)
+        XCTAssertNil(dragScrollView.runtime.capture.deferredTouchViewForFreshCapture)
+        XCTAssertTrue(dragScrollView.runtime.transition.isUserDragLifecycleActive)
+    }
+
+    func testTransactionlessDecelerationTrackingOnlyRefreshReleasesCaptureAfterLift() async throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard dragScrollView.responds(to: trackingDidBegin),
+              dragScrollView.responds(to: trackingDidEnd) else {
+            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
+            return
+        }
+        defer {
+            if dragScrollView.nativeScrollState.isTracking {
+                dragScrollView.perform(trackingDidEnd)
+            }
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            dragScrollView.endCapture()
+            window.isHidden = true
+        }
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.scrollViewDidEndDragging(
+            dragScrollView,
+            willDecelerate: true
+        )
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        participant.contentSize = CGSize(width: 320, height: 420)
+        let metricsCallbackDrained = expectation(description: "dirty metrics callback drained")
+        DispatchQueue.main.async { metricsCallbackDrained.fulfill() }
+        await fulfillment(of: [metricsCallbackDrained], timeout: 1)
+        XCTAssertTrue(session.hasDeferredMetricsChange)
+
+        dragScrollView.perform(trackingDidBegin)
+        dragScrollView.beginCapture(from: leafView)
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
+
+        let ownershipAtTerminal = try XCTUnwrap(
+            dragScrollView.runtime.transition.captureCleanupOwnership
+        )
+        dragScrollView.beginCapture(from: leafView)
+        let refreshedOwnership = try XCTUnwrap(
+            dragScrollView.runtime.transition.captureCleanupOwnership
+        )
+
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertTrue(dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(session.model, model)
+        XCTAssertEqual(refreshedOwnership.sessionID, ownershipAtTerminal.sessionID)
+        XCTAssertNotEqual(
+            refreshedOwnership.sessionOwnershipGeneration,
+            ownershipAtTerminal.sessionOwnershipGeneration
+        )
+        dragScrollView.perform(trackingDidEnd)
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertNil(dragScrollView.runtime.capture.session)
+        XCTAssertNil(dragScrollView.runtime.transition.captureCleanupOwnership)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+    }
+
+    func testStaleSystemAnimationEndCallbackCannotFinishReplacement() async {
         let (dragScrollView, _) = makeHost(detents: [100, 200, 300])
         let window = attachToWindow(dragScrollView)
-        defer { window.isHidden = true }
+        defer {
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            window.isHidden = true
+        }
         var firstResults: [BODragScrollMovementResult] = []
         var secondResults: [BODragScrollMovementResult] = []
+        let secondFinished = expectation(description: "replacement system animation finished")
 
         dragScrollView.move(
             toDisplayHeight: 300,
@@ -780,10 +1614,14 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             toDisplayHeight: 200,
             animated: true,
             options: BODragScrollMovementOptions(style: .systemScroll)
-        ) { secondResults.append($0) }
+        ) {
+            secondResults.append($0)
+            secondFinished.fulfill()
+        }
 
         XCTAssertEqual(firstResults.map(\.outcome), [.interrupted])
         let replacementID = dragScrollView.runtime.transition.activeTransaction?.id
+        XCTAssertFalse(dragScrollView.runtime.transition.systemAnimationHasObservedProgress)
 
         // Simulate animation A's identifier-less UIKit callback arriving after B owns the driver.
         dragScrollView.scrollViewDidEndScrollingAnimation(dragScrollView)
@@ -791,9 +1629,26 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(dragScrollView.runtime.transition.activeTransaction?.id, replacementID)
         XCTAssertTrue(secondResults.isEmpty)
 
-        dragScrollView.move(toDisplayHeight: 250, animated: false)
-        XCTAssertEqual(secondResults.map(\.outcome), [.interrupted])
-        XCTAssertEqual(dragScrollView.displayHeight, 250, accuracy: 0.001)
+        // Three stable samples are enough to validate a real completion only after B itself made
+        // progress or reached its target. A's stale callback cannot settle B at that threshold.
+        let passedThreeSamples = expectation(description: "passed three settlement samples")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            passedThreeSamples.fulfill()
+        }
+        await fulfillment(of: [passedThreeSamples], timeout: 1)
+
+        XCTAssertEqual(dragScrollView.runtime.transition.activeTransaction?.id, replacementID)
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .systemAnimation)
+        XCTAssertTrue(secondResults.isEmpty)
+
+        // B may now complete through real UIKit progress/target arrival or the existing 12-sample
+        // no-progress fallback. Either path belongs to B and must publish a completed result.
+        await fulfillment(of: [secondFinished], timeout: 1)
+
+        XCTAssertEqual(secondResults.map(\.outcome), [.completed])
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertEqual(dragScrollView.displayHeight, 200, accuracy: 0.001)
     }
 
     func testScrollToTopInterruptsActiveViewAnimationAndTakesOwnership() {
@@ -841,6 +1696,56 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(dragScrollView.displayHeight, 200, accuracy: 0.001)
     }
 
+    func testStaleScrollToTopCallbackCannotFinishReplacementRequest() async throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 200, 300])
+        let window = attachToWindow(dragScrollView)
+        defer {
+            dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            window.isHidden = true
+        }
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        XCTAssertTrue(dragScrollView.scrollViewShouldScrollToTop(dragScrollView))
+        let firstID = try XCTUnwrap(
+            dragScrollView.runtime.transition.activeTransaction?.id
+        )
+
+        // Replace A completely, return to a non-top position, then authorize B. UIKit can still
+        // deliver A's identifier-less didScrollToTop callback while B is current.
+        _ = dragScrollView.move(toDisplayHeight: 200, animated: false)
+        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        XCTAssertTrue(dragScrollView.scrollViewShouldScrollToTop(dragScrollView))
+        let replacementID = try XCTUnwrap(
+            dragScrollView.runtime.transition.activeTransaction?.id
+        )
+        XCTAssertNotEqual(firstID, replacementID)
+
+        dragScrollView.scrollViewDidScrollToTop(dragScrollView)
+
+        let passedThreeSamples = expectation(description: "passed three scroll-to-top samples")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            passedThreeSamples.fulfill()
+        }
+        await fulfillment(of: [passedThreeSamples], timeout: 1)
+
+        XCTAssertEqual(
+            dragScrollView.runtime.transition.activeTransaction?.id,
+            replacementID
+        )
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .scrollToTop)
+
+        // B has no UIKit progress in this direct-delegate test. Its own 12-sample fallback, not
+        // A's stale callback, commits the already-resolved target and completes B.
+        let fallbackFinished = expectation(description: "replacement fallback finished")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            fallbackFinished.fulfill()
+        }
+        await fulfillment(of: [fallbackFinished], timeout: 1)
+
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertEqual(dragScrollView.displayHeight, 100, accuracy: 0.001)
+    }
+
     func testDisplayHeightCallbackMovementOwnsCompletedLayout() {
         let (dragScrollView, _) = makeHost(layout: false)
         let delegate = DisplayHeightCallbackDelegate()
@@ -854,6 +1759,98 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(dragScrollView.displayHeight, 240, accuracy: 0.001)
         XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
         XCTAssertNil(dragScrollView.runtime.transition.pendingLayoutMovement)
+    }
+
+    func testLayoutRebuildCannotOverwriteReentrantSamePanelMovement() {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        var configuration = dragScrollView.configuration
+        configuration.handoff.offsetMismatch = .restoreToBoundary
+        dragScrollView.configuration = configuration
+        layout(dragScrollView)
+
+        let participant = OffsetObservingScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+        )
+        participant.contentSize = CGSize(width: 320, height: 900)
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+
+        let oldLayoutHeight = dragScrollView.displayHeight
+        let newMovementHeight = oldLayoutHeight + dragScrollView.comparisonPolicy.boundaryBand * 0.5
+        participant.contentOffset.y = -10
+        var didStartNewMovement = false
+        participant.offsetDidChange = { _ in
+            guard !didStartNewMovement else { return }
+            didStartNewMovement = true
+            _ = dragScrollView.move(toDisplayHeight: newMovementHeight, animated: false)
+            // UIScrollView pixel-aligns a programmatic half-pixel `contentOffset`. Inject the exact
+            // bounds sample that may arise from composite arithmetic, then let the normal callback
+            // publish it. Without the layout transaction epoch guard, the stale layout correction
+            // below would pull this newer sub-pixel geometry back to `oldLayoutHeight`.
+            var exactBounds = dragScrollView.bounds
+            exactBounds.origin.y = newMovementHeight - exactBounds.height
+            dragScrollView.bounds = exactBounds
+            XCTAssertEqual(
+                dragScrollView.contentOffset.y,
+                exactBounds.origin.y,
+                accuracy: 0.000_000_001
+            )
+            dragScrollView.scrollViewDidScroll(dragScrollView)
+        }
+
+        dragScrollView.invalidatePanelLayout()
+        layout(dragScrollView)
+
+        XCTAssertTrue(didStartNewMovement)
+        XCTAssertEqual(dragScrollView.displayHeight, newMovementHeight, accuracy: 0.000_001)
+        XCTAssertEqual(
+            dragScrollView.contentOffset.y,
+            newMovementHeight - dragScrollView.bounds.height,
+            accuracy: 0.000_001
+        )
+        XCTAssertNil(dragScrollView.runtime.capture.session)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+    }
+
+    func testLayoutPublishesRealGeometryAfterReentrantMovementCancelsImmediately() {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        var configuration = dragScrollView.configuration
+        configuration.handoff.offsetMismatch = .restoreToBoundary
+        dragScrollView.configuration = configuration
+        let provider = LayoutDisplayHeightProvider(targetDisplayHeight: 180)
+        dragScrollView.behaviorProvider = provider
+        layout(dragScrollView)
+
+        let participant = OffsetObservingScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300)
+        )
+        participant.contentSize = CGSize(width: 320, height: 900)
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+        participant.contentOffset.y = -10
+
+        let recorder = MovementEventRecorder()
+        dragScrollView.eventDelegate = recorder
+        var didAttemptInvalidMovement = false
+        participant.offsetDidChange = { _ in
+            guard !didAttemptInvalidMovement else { return }
+            didAttemptInvalidMovement = true
+            _ = dragScrollView.move(toDisplayHeight: .nan, animated: false)
+        }
+
+        provider.isArmed = true
+        dragScrollView.invalidatePanelLayout()
+        layout(dragScrollView)
+
+        XCTAssertTrue(didAttemptInvalidMovement)
+        XCTAssertEqual(dragScrollView.displayHeightForCurrentGeometry, 180, accuracy: 0.000_001)
+        XCTAssertEqual(dragScrollView.displayHeight, 180, accuracy: 0.000_001)
+        XCTAssertEqual(recorder.changedDisplayHeights, [180])
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
     }
 
     func testMovementStyleCallbackCannotOverwriteReentrantMovement() {
@@ -1045,6 +2042,42 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let segment = try XCTUnwrap(model.segments.first(where: \.isParticipantSegment))
         XCTAssertTrue(model.detentDisplayHeights.isEmpty)
         XCTAssertEqual(segment.displayHeight, nativeDisplayHeight)
+    }
+
+    func testInnerSegmentScrollKeepsRealGeometryAtExactModelHeight() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300.123_456,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        let scrollView = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 20, width: 40, height: 40))
+        scrollView.addSubview(leafView)
+        panelView.addSubview(scrollView)
+        dragScrollView.beginCapture(from: leafView)
+        defer { dragScrollView.endCapture() }
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        let segment = try XCTUnwrap(model.segments.first(where: \.isParticipantSegment))
+        let targetOuterOffset = segment.outerStart + segment.outerLength * 0.5
+
+        dragScrollView.contentOffset.y = targetOuterOffset
+        dragScrollView.scrollViewDidScroll(dragScrollView)
+
+        XCTAssertEqual(scrollView.contentOffset.y, 300)
+        XCTAssertEqual(dragScrollView.displayHeightForCurrentGeometry, segment.displayHeight)
+        XCTAssertEqual(dragScrollView.displayHeight, segment.displayHeight)
+        XCTAssertEqual(
+            panelView.frame.minY,
+            dragScrollView.bounds.height + dragScrollView.contentOffset.y - segment.displayHeight
+        )
     }
 
     func testContinuationActivationPreservesNativeCurrentDisplayHeight() throws {
@@ -1587,6 +2620,1037 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(participant.contentOffset, detachedOffset)
     }
 
+    func testBottomInnerOverscrollWillEndDoesNotMutateLiveGeometry() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        defer {
+            if fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                fixture.dragScrollView.scrollViewDidEndDragging(
+                    fixture.dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let hostInset = fixture.dragScrollView.contentInset
+        let hostContentSize = fixture.dragScrollView.contentSize
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+        let captureOperationEpoch = fixture.dragScrollView.runtime.capture.operationEpoch
+        fixture.participant.resetRequests()
+        var target = CGPoint(
+            x: hostOffset.x,
+            y: fixture.maximumOuterOffset
+        )
+
+        fixture.dragScrollView.scrollViewWillEndDragging(
+            fixture.dragScrollView,
+            withVelocity: .zero,
+            targetContentOffset: &target
+        )
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(fixture.dragScrollView.runtime.capture.operationEpoch, captureOperationEpoch)
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.dragScrollView.contentInset, hostInset)
+        XCTAssertEqual(fixture.dragScrollView.contentSize, hostContentSize)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+        XCTAssertTrue(fixture.participant.requests.isEmpty)
+        XCTAssertEqual(target.y, fixture.maximumOuterOffset, accuracy: 0.001)
+    }
+
+    func testBottomInnerOverscrollDidEndWithoutDecelerationDoesNotSynchronouslyClampParticipant() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        defer {
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        var target = CGPoint(
+            x: fixture.dragScrollView.contentOffset.x,
+            y: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.scrollViewWillEndDragging(
+            fixture.dragScrollView,
+            withVelocity: .zero,
+            targetContentOffset: &target
+        )
+        fixture.participant.resetRequests()
+
+        fixture.dragScrollView.scrollViewDidEndDragging(
+            fixture.dragScrollView,
+            willDecelerate: false
+        )
+
+        XCTAssertFalse(
+            fixture.participant.requests.contains { request in
+                !request.animated
+                    && abs(request.contentOffset.y - fixture.participantMaximumOffset) < 0.001
+            },
+            "A normal drag release must not synchronously clamp the participant bounce to its boundary."
+        )
+        XCTAssertGreaterThan(
+            fixture.participant.contentOffset.y,
+            fixture.participantMaximumOffset
+        )
+    }
+
+    func testBottomInnerOverscrollWithoutNativeDecelerationReturnsThroughHostSystemAnimation() async throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let originalSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let events = ReentrantDecelerationDelegate()
+        let completed = expectation(description: "host overscroll return completed")
+        events.onDidFinishMovement = { result in
+            if result.reason == .dragRelease {
+                completed.fulfill()
+            }
+        }
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        var target = CGPoint(
+            x: fixture.dragScrollView.contentOffset.x,
+            y: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.scrollViewWillEndDragging(
+            fixture.dragScrollView,
+            withVelocity: .zero,
+            targetContentOffset: &target
+        )
+
+        fixture.dragScrollView.scrollViewDidEndDragging(
+            fixture.dragScrollView,
+            willDecelerate: false
+        )
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
+        XCTAssertGreaterThan(
+            fixture.participant.contentOffset.y,
+            fixture.participantMaximumOffset
+        )
+
+        let fallbackStarted = expectation(description: "fallback scheduled after terminal callback")
+        DispatchQueue.main.async { fallbackStarted.fulfill() }
+        await fulfillment(of: [fallbackStarted], timeout: 1)
+
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .systemAnimation)
+        XCTAssertEqual(
+            try XCTUnwrap(
+                fixture.dragScrollView.runtime.transition.systemAnimationTargetOffsetY
+            ),
+            fixture.maximumOuterOffset,
+            accuracy: 0.001
+        )
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
+
+        await fulfillment(of: [completed], timeout: 2)
+
+        XCTAssertEqual(events.results.last?.outcome, .completed)
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertEqual(
+            fixture.participant.contentOffset.y,
+            fixture.participantMaximumOffset,
+            accuracy: 0.0001
+        )
+    }
+
+    func testNewTouchCanTakeOverHostOverscrollReturnWithoutRebuildingCapture() async throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let events = ReentrantDecelerationDelegate()
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            if fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                fixture.dragScrollView.scrollViewDidEndDragging(
+                    fixture.dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        var target = CGPoint(
+            x: fixture.dragScrollView.contentOffset.x,
+            y: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.scrollViewWillEndDragging(
+            fixture.dragScrollView,
+            withVelocity: .zero,
+            targetContentOffset: &target
+        )
+        fixture.dragScrollView.scrollViewDidEndDragging(
+            fixture.dragScrollView,
+            willDecelerate: false
+        )
+        let fallbackStarted = expectation(description: "host return started")
+        DispatchQueue.main.async { fallbackStarted.fulfill() }
+        await fulfillment(of: [fallbackStarted], timeout: 1)
+
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let oldGeneration = session.ownershipGeneration
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertGreaterThan(session.ownershipGeneration, oldGeneration)
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.driver)
+        XCTAssertEqual(events.results.map(\.reason), [.dragRelease])
+        XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
+
+        fixture.dragScrollView.scrollViewDidEndScrollingAnimation(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+    }
+
+    func testNewTouchDuringParticipantDecelerationRefreshesSameCaptureAndInterruptsOldMovement() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let participantLifecycle = ParticipantLifecycleSpy()
+        let events = ReentrantDecelerationDelegate()
+        fixture.participant.delegate = participantLifecycle
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.participant.delegate = nil
+            if fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                fixture.dragScrollView.scrollViewDidEndDragging(
+                    fixture.dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+
+        fixture.dragScrollView.contentOffset.y = fixture.maximumOuterOffset - 100
+        fixture.dragScrollView.scrollViewDidScroll(fixture.dragScrollView)
+        let originalSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let originalGeneration = originalSession.ownershipGeneration
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+        XCTAssertLessThan(
+            fixture.participant.contentOffset.y,
+            fixture.participantMaximumOffset
+        )
+
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        let refreshedSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertTrue(refreshedSession === originalSession)
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
+        XCTAssertGreaterThan(refreshedSession.ownershipGeneration, originalGeneration)
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertEqual(events.results.map(\.reason), [.dragRelease])
+        XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
+        XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
+        XCTAssertEqual(participantLifecycle.began.count, 1)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
+        XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+    }
+
+    func testNewTouchDuringBottomBounceDecelerationPreservesSameCaptureAndIgnoresLateOldEnd() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let participantLifecycle = ParticipantLifecycleSpy()
+        let events = ReentrantDecelerationDelegate()
+        fixture.participant.delegate = participantLifecycle
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.participant.delegate = nil
+            if fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                fixture.dragScrollView.contentOffset.y = fixture.maximumOuterOffset
+                fixture.dragScrollView.scrollViewDidScroll(fixture.dragScrollView)
+                fixture.dragScrollView.scrollViewDidEndDragging(
+                    fixture.dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+
+        let originalSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let originalGeneration = originalSession.ownershipGeneration
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let hostInset = fixture.dragScrollView.contentInset
+        let hostContentSize = fixture.dragScrollView.contentSize
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        let refreshedSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertTrue(refreshedSession === originalSession)
+        XCTAssertGreaterThan(refreshedSession.ownershipGeneration, originalGeneration)
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
+        XCTAssertEqual(
+            fixture.dragScrollView.runtime.capture.session?.ownershipGeneration,
+            refreshedSession.ownershipGeneration
+        )
+        XCTAssertEqual(
+            fixture.dragScrollView.runtime.transition.captureCleanupOwnership?.sessionID,
+            originalSession.id
+        )
+        XCTAssertEqual(
+            fixture.dragScrollView.runtime.transition.captureCleanupOwnership?
+                .sessionOwnershipGeneration,
+            refreshedSession.ownershipGeneration
+        )
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.dragScrollView.contentInset, hostInset)
+        XCTAssertEqual(fixture.dragScrollView.contentSize, hostContentSize)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertEqual(events.results.map(\.reason), [.dragRelease])
+        XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
+        XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
+        XCTAssertEqual(participantLifecycle.began.count, 1)
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertEqual(events.willBeginDraggingCount, 1)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+
+        // UIKit may still deliver the callback belonging to the deceleration interrupted above.
+        // It has no authority over the tracking lifecycle and refreshed capture generation.
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
+        XCTAssertEqual(
+            fixture.dragScrollView.runtime.capture.session?.ownershipGeneration,
+            refreshedSession.ownershipGeneration
+        )
+        XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+    }
+
+    func testNewTouchStopsWhenSyntheticOldDecelerationEndRemovesHost() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let participantLifecycle = SyntheticDecelerationMutationDelegate()
+        let events = ReentrantDecelerationDelegate()
+        fixture.participant.delegate = participantLifecycle
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.participant.delegate = nil
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        participantLifecycle.onDidEndDecelerating = {
+            fixture.dragScrollView.removeFromSuperview()
+        }
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertNil(fixture.dragScrollView.window)
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.captureCleanupOwnership)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertEqual(participantLifecycle.didEndDeceleratingCount, 1)
+        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 0)
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertEqual(events.willBeginDraggingCount, 0)
+    }
+
+    func testNewTouchStopsWhenSyntheticOldDecelerationEndReplacesPanel() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let participantLifecycle = SyntheticDecelerationMutationDelegate()
+        let events = ReentrantDecelerationDelegate()
+        fixture.participant.delegate = participantLifecycle
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.participant.delegate = nil
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        let replacementPanel = UIView(frame: fixture.panelView.frame)
+        participantLifecycle.onDidEndDecelerating = {
+            fixture.dragScrollView.panelView = replacementPanel
+        }
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.panelView === replacementPanel)
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.captureCleanupOwnership)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertEqual(participantLifecycle.didEndDeceleratingCount, 1)
+        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 0)
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertEqual(events.willBeginDraggingCount, 0)
+    }
+
+    func testNewTouchStopsWhenInterruptedMovementCompletionRemovesHost() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let participantLifecycle = ParticipantLifecycleSpy()
+        let events = ReentrantDecelerationDelegate()
+        fixture.participant.delegate = participantLifecycle
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.participant.delegate = nil
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        events.onDidFinishMovement = { result in
+            guard result.reason == .dragRelease,
+                  result.outcome == .interrupted else { return }
+            fixture.dragScrollView.removeFromSuperview()
+        }
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
+        XCTAssertNil(fixture.dragScrollView.window)
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.captureCleanupOwnership)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertTrue(participantLifecycle.began.isEmpty)
+        XCTAssertEqual(events.willBeginDraggingCount, 0)
+    }
+
+    func testQueuedHostOverscrollReturnResumesAfterTrackingOnlyTouchEnds() async throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard fixture.dragScrollView.responds(to: trackingDidBegin),
+              fixture.dragScrollView.responds(to: trackingDidEnd) else {
+            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
+            return
+        }
+        let events = ReentrantDecelerationDelegate()
+        let completed = expectation(description: "host overscroll return completed")
+        events.onDidFinishMovement = { result in
+            guard result.reason == .dragRelease else { return }
+            completed.fulfill()
+        }
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            if fixture.dragScrollView.nativeScrollState.isTracking {
+                fixture.dragScrollView.perform(trackingDidEnd)
+            }
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        var target = CGPoint(
+            x: fixture.dragScrollView.contentOffset.x,
+            y: fixture.maximumOuterOffset
+        )
+        fixture.dragScrollView.scrollViewWillEndDragging(
+            fixture.dragScrollView,
+            withVelocity: .zero,
+            targetContentOffset: &target
+        )
+
+        fixture.dragScrollView.scrollViewDidEndDragging(
+            fixture.dragScrollView,
+            willDecelerate: false
+        )
+        // A short touch can put UIScrollView into tracking before the queued return executes,
+        // without ever reaching scrollViewWillBeginDragging(_:). It temporarily owns physics.
+        fixture.dragScrollView.perform(trackingDidBegin)
+        XCTAssertTrue(fixture.dragScrollView.nativeScrollState.isTracking)
+        await Task.yield()
+
+        XCTAssertNotEqual(fixture.dragScrollView.runtime.transition.driver, .systemAnimation)
+        XCTAssertNotNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNotNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertEqual(events.willBeginDraggingCount, 0)
+
+        fixture.dragScrollView.perform(trackingDidEnd)
+        XCTAssertFalse(fixture.dragScrollView.nativeScrollState.isTracking)
+
+        await fulfillment(of: [completed], timeout: 2)
+
+        XCTAssertEqual(events.results.map(\.outcome), [.completed])
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.driver)
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+    }
+
+    func testDecelerationEndDuringTrackingOnlyTouchSettlesAfterTouchEnds() async throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard fixture.dragScrollView.responds(to: trackingDidBegin),
+              fixture.dragScrollView.responds(to: trackingDidEnd) else {
+            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
+            return
+        }
+        let events = ReentrantDecelerationDelegate()
+        let completed = expectation(description: "interrupted deceleration settled")
+        events.onDidFinishMovement = { result in
+            guard result.reason == .dragRelease else { return }
+            completed.fulfill()
+        }
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            if fixture.dragScrollView.nativeScrollState.isTracking {
+                fixture.dragScrollView.perform(trackingDidEnd)
+            }
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let transaction = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.activeTransaction
+        )
+
+        fixture.dragScrollView.perform(trackingDidBegin)
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.nativeScrollState.isTracking)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+
+        fixture.dragScrollView.perform(trackingDidEnd)
+        await fulfillment(of: [completed], timeout: 2)
+
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertEqual(events.results.map(\.outcome), [.completed])
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.driver)
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+    }
+
+    func testDirtyDecelerationTrackingOnlyTouchKeepsOldAxisUntilSettlement() async throws {
+        let fixture = try makeAutomaticBottomInnerOverscrollFixture()
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard fixture.dragScrollView.responds(to: trackingDidBegin),
+              fixture.dragScrollView.responds(to: trackingDidEnd) else {
+            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
+            return
+        }
+        let events = ReentrantDecelerationDelegate()
+        let completed = expectation(description: "dirty interrupted deceleration settled")
+        events.onDidFinishMovement = { result in
+            guard result.reason == .dragRelease else { return }
+            completed.fulfill()
+        }
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            if fixture.dragScrollView.nativeScrollState.isTracking {
+                fixture.dragScrollView.perform(trackingDidEnd)
+            }
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        let transaction = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.activeTransaction
+        )
+        fixture.participant.contentSize = CGSize(width: 320, height: 420)
+        let metricsCallbackDrained = expectation(description: "dirty metrics callback drained")
+        DispatchQueue.main.async { metricsCallbackDrained.fulfill() }
+        await fulfillment(of: [metricsCallbackDrained], timeout: 1)
+        XCTAssertTrue(session.hasDeferredMetricsChange)
+
+        fixture.dragScrollView.perform(trackingDidBegin)
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(session.model, model)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+        let ownershipAtTerminal = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.captureCleanupOwnership
+        )
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        let refreshedOwnership = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.captureCleanupOwnership
+        )
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(session.model, model)
+        XCTAssertEqual(refreshedOwnership.sessionID, ownershipAtTerminal.sessionID)
+        XCTAssertNotEqual(
+            refreshedOwnership.sessionOwnershipGeneration,
+            ownershipAtTerminal.sessionOwnershipGeneration
+        )
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
+        fixture.dragScrollView.perform(trackingDidEnd)
+        await fulfillment(of: [completed], timeout: 2)
+
+        XCTAssertEqual(events.results.map(\.outcome), [.completed])
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        let finalInset = fixture.participant.effectiveContentInset
+        let finalMaximumOffset = max(
+            -finalInset.top,
+            fixture.participant.contentSize.height
+                + finalInset.bottom
+                - fixture.participant.bounds.height
+        )
+        XCTAssertEqual(
+            fixture.participant.contentOffset.y,
+            finalMaximumOffset,
+            accuracy: 0.0001
+        )
+    }
+
+    func testParticipantWillBeginPanelReplacementPairsOnlyParticipantLifecycle() throws {
+        let fixture = try makeCapturedParticipantFixture()
+        let participantLifecycle = ParticipantLifecycleSpy()
+        let hostLifecycle = ReentrantDragLifecycleEventDelegate()
+        fixture.participant.delegate = participantLifecycle
+        fixture.dragScrollView.eventDelegate = hostLifecycle
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.participant.delegate = nil
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+        }
+        let replacementPanel = UIView(frame: fixture.panelView.frame)
+        participantLifecycle.onWillBeginDragging = {
+            fixture.dragScrollView.panelView = replacementPanel
+        }
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.panelView === replacementPanel)
+        XCTAssertEqual(participantLifecycle.began.count, 1)
+        XCTAssertEqual(participantLifecycle.didEnd.count, 1)
+        XCTAssertTrue(participantLifecycle.didEnd.first === fixture.participant)
+        XCTAssertEqual(hostLifecycle.willBeginDraggingCount, 0)
+        XCTAssertTrue(hostLifecycle.didEndDraggingValues.isEmpty)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.captureCleanupOwnership)
+    }
+
+    func testHostWillBeginPanelReplacementPairsHostAndParticipantLifecycles() throws {
+        let fixture = try makeCapturedParticipantFixture()
+        let participantLifecycle = ParticipantLifecycleSpy()
+        let hostLifecycle = ReentrantDragLifecycleEventDelegate()
+        fixture.participant.delegate = participantLifecycle
+        fixture.dragScrollView.eventDelegate = hostLifecycle
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.participant.delegate = nil
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+        }
+        let replacementPanel = UIView(frame: fixture.panelView.frame)
+        hostLifecycle.onWillBeginDragging = {
+            fixture.dragScrollView.panelView = replacementPanel
+        }
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.panelView === replacementPanel)
+        XCTAssertEqual(participantLifecycle.began.count, 1)
+        XCTAssertEqual(participantLifecycle.didEnd.count, 1)
+        XCTAssertTrue(participantLifecycle.didEnd.first === fixture.participant)
+        XCTAssertEqual(hostLifecycle.willBeginDraggingCount, 1)
+        XCTAssertEqual(hostLifecycle.didEndDraggingValues, [false])
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.captureCleanupOwnership)
+    }
+
+    func testParticipantShrinkDuringActiveBottomOverscrollDefersModelUntilLifecycleEnds() async throws {
+        let fixture = try makeCapturedParticipantFixture()
+        defer {
+            if fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                fixture.dragScrollView.scrollViewDidEndDragging(
+                    fixture.dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+        }
+        var configuration = fixture.dragScrollView.configuration
+        configuration.bounce.preferredBottomOwner = .innerScrollView
+        fixture.dragScrollView.configuration = configuration
+        fixture.dragScrollView.reloadScrollMetrics()
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        let maximumOuterOffset = fixture.dragScrollView.maximumOuterOffset
+        fixture.dragScrollView.contentOffset.y = maximumOuterOffset + 30
+        fixture.dragScrollView.scrollViewDidScroll(fixture.dragScrollView)
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        let operationEpoch = fixture.dragScrollView.runtime.capture.operationEpoch
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let hostInset = fixture.dragScrollView.contentInset
+        let hostContentSize = fixture.dragScrollView.contentSize
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+        XCTAssertGreaterThan(
+            participantOffset.y,
+            fixture.participant.contentSize.height - fixture.participant.bounds.height
+        )
+
+        fixture.participant.contentSize = CGSize(width: 320, height: 420)
+        let metricsCallbackDrained = expectation(description: "participant metrics callback drained")
+        DispatchQueue.main.async { metricsCallbackDrained.fulfill() }
+        await fulfillment(of: [metricsCallbackDrained], timeout: 1)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(try XCTUnwrap(session.model), model)
+        XCTAssertEqual(fixture.dragScrollView.runtime.capture.operationEpoch, operationEpoch)
+        XCTAssertTrue(session.hasDeferredMetricsChange)
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.dragScrollView.contentInset, hostInset)
+        XCTAssertEqual(fixture.dragScrollView.contentSize, hostContentSize)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+
+        fixture.dragScrollView.scrollViewDidEndDragging(
+            fixture.dragScrollView,
+            willDecelerate: false
+        )
+
+        let inset = fixture.participant.effectiveContentInset
+        let newStandaloneMaximum = max(
+            -inset.top,
+            fixture.participant.contentSize.height
+                + inset.bottom
+                - fixture.participant.bounds.height
+        )
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertEqual(
+            fixture.participant.contentOffset.y,
+            newStandaloneMaximum,
+            accuracy: 0.0001
+        )
+
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        let freshSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let freshModel = try XCTUnwrap(freshSession.model)
+        XCTAssertFalse(freshSession === session)
+        XCTAssertNotEqual(freshSession.id, session.id)
+        XCTAssertFalse(freshSession.hasDeferredMetricsChange)
+        XCTAssertNotEqual(freshModel, model)
+        let freshParticipantDistance = freshModel.segments.reduce(CGFloat.zero) {
+            $0 + ($1.isParticipantSegment ? $1.innerLength : 0)
+        }
+        XCTAssertEqual(freshParticipantDistance, newStandaloneMaximum + inset.top, accuracy: 0.001)
+    }
+
+    func testParticipantShrinkDuringBottomBounceDecelerationRestoresOldProjection() async throws {
+        let fixture = try makeAutomaticBottomInnerOverscrollFixture()
+        defer {
+            if fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating {
+                fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let transaction = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.activeTransaction
+        )
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        let operationEpoch = fixture.dragScrollView.runtime.capture.operationEpoch
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let hostInset = fixture.dragScrollView.contentInset
+        let hostContentSize = fixture.dragScrollView.contentSize
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+
+        fixture.participant.contentSize = CGSize(width: 320, height: 420)
+        let metricsCallbackDrained = expectation(description: "shrink metrics callback drained")
+        DispatchQueue.main.async { metricsCallbackDrained.fulfill() }
+        await fulfillment(of: [metricsCallbackDrained], timeout: 1)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(try XCTUnwrap(session.model), model)
+        XCTAssertEqual(fixture.dragScrollView.runtime.capture.operationEpoch, operationEpoch)
+        XCTAssertTrue(session.hasDeferredMetricsChange)
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.dragScrollView.contentInset, hostInset)
+        XCTAssertEqual(fixture.dragScrollView.contentSize, hostContentSize)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+    }
+
+    func testParticipantGrowthDuringBottomBounceDecelerationPreservesBounceDistance() async throws {
+        let fixture = try makeAutomaticBottomInnerOverscrollFixture()
+        defer {
+            if fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating {
+                fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let transaction = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.activeTransaction
+        )
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        let operationEpoch = fixture.dragScrollView.runtime.capture.operationEpoch
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let hostInset = fixture.dragScrollView.contentInset
+        let hostContentSize = fixture.dragScrollView.contentSize
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+
+        fixture.participant.contentSize = CGSize(width: 320, height: 1_200)
+        let metricsCallbackDrained = expectation(description: "growth metrics callback drained")
+        DispatchQueue.main.async { metricsCallbackDrained.fulfill() }
+        await fulfillment(of: [metricsCallbackDrained], timeout: 1)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(try XCTUnwrap(session.model), model)
+        XCTAssertEqual(fixture.dragScrollView.runtime.capture.operationEpoch, operationEpoch)
+        XCTAssertTrue(session.hasDeferredMetricsChange)
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.dragScrollView.contentInset, hostInset)
+        XCTAssertEqual(fixture.dragScrollView.contentSize, hostContentSize)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+
+        let inset = fixture.participant.effectiveContentInset
+        let grownStandaloneMaximum = max(
+            -inset.top,
+            fixture.participant.contentSize.height
+                + inset.bottom
+                - fixture.participant.bounds.height
+        )
+        XCTAssertLessThan(fixture.participant.contentOffset.y, grownStandaloneMaximum)
+        let overscroll = try XCTUnwrap(fixture.dragScrollView.hostOverscrollState())
+        XCTAssertEqual(overscroll.edge, .bottom)
+        XCTAssertEqual(overscroll.distance, 30, accuracy: 0.001)
+        XCTAssertEqual(
+            overscroll.owner,
+            session.primaryParticipant.map { .participant($0.id) }
+        )
+    }
+
+    func testConfigurationAndProviderLayoutWaitForActiveBounceLifecycle() async throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let replacementProvider = CallbackPanelSizeProvider(
+            size: CGSize(width: 320, height: 900)
+        )
+        let events = ReentrantDecelerationDelegate()
+        let completed = expectation(description: "active bounce settled before provider layout")
+        events.onDidFinishMovement = { result in
+            guard result.reason == .dragRelease else { return }
+            completed.fulfill()
+        }
+        fixture.dragScrollView.eventDelegate = events
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            fixture.dragScrollView.interruptActiveMovement(outcome: .interrupted)
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+            _ = replacementProvider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let model = try XCTUnwrap(session.model)
+        let transaction = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.activeTransaction
+        )
+        let operationEpoch = fixture.dragScrollView.runtime.capture.operationEpoch
+        let hostOffset = fixture.dragScrollView.contentOffset
+        let hostInset = fixture.dragScrollView.contentInset
+        let hostContentSize = fixture.dragScrollView.contentSize
+        let panelFrame = fixture.panelView.frame
+        let participantOffset = fixture.participant.contentOffset
+
+        var configuration = fixture.dragScrollView.configuration
+        configuration.bounce.preferredBottomOwner = .panel
+        fixture.dragScrollView.configuration = configuration
+        fixture.dragScrollView.behaviorProvider = replacementProvider
+        layout(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertEqual(session.model, model)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertEqual(fixture.dragScrollView.runtime.capture.operationEpoch, operationEpoch)
+        XCTAssertEqual(fixture.dragScrollView.contentOffset, hostOffset)
+        XCTAssertEqual(fixture.dragScrollView.contentInset, hostInset)
+        XCTAssertEqual(fixture.dragScrollView.contentSize, hostContentSize)
+        XCTAssertEqual(fixture.panelView.frame, panelFrame)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+        XCTAssertTrue(
+            fixture.dragScrollView.runtime.panel.defersConfigurationLayoutUntilCaptureEnds
+        )
+
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+        await fulfillment(of: [completed], timeout: 2)
+        layout(fixture.dragScrollView)
+
+        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertFalse(
+            fixture.dragScrollView.runtime.panel.defersConfigurationLayoutUntilCaptureEnds
+        )
+        XCTAssertEqual(fixture.panelView.frame.height, 900, accuracy: 0.001)
+    }
+
+    func testNewTouchDuringDirtyBottomBounceDecelerationBuildsFreshCapture() async throws {
+        let fixture = try makeAutomaticBottomInnerOverscrollFixture()
+        let events = ReentrantDecelerationDelegate()
+        defer {
+            fixture.dragScrollView.eventDelegate = nil
+            if fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                fixture.dragScrollView.scrollViewDidEndDragging(
+                    fixture.dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let oldTransaction = try XCTUnwrap(
+            fixture.dragScrollView.runtime.transition.activeTransaction
+        )
+        let oldSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let oldModel = try XCTUnwrap(oldSession.model)
+        let oldOperationEpoch = fixture.dragScrollView.runtime.capture.operationEpoch
+
+        fixture.participant.contentSize = CGSize(width: 320, height: 420)
+        let metricsCallbackDrained = expectation(description: "dirty metrics callback drained")
+        DispatchQueue.main.async { metricsCallbackDrained.fulfill() }
+        await fulfillment(of: [metricsCallbackDrained], timeout: 1)
+        XCTAssertTrue(oldSession.hasDeferredMetricsChange)
+        fixture.dragScrollView.eventDelegate = events
+
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+
+        // Touch-down alone must not install a fresh axis under the old deceleration driver. The
+        // old model remains authoritative until this touch becomes an actual drag.
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === oldSession)
+        XCTAssertTrue(oldSession.model == oldModel)
+        XCTAssertTrue(oldSession.hasDeferredMetricsChange)
+        XCTAssertTrue(
+            fixture.dragScrollView.runtime.transition.activeTransaction === oldTransaction
+        )
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        let freshSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
+        let freshModel = try XCTUnwrap(freshSession.model)
+        XCTAssertFalse(freshSession === oldSession)
+        XCTAssertNotEqual(freshSession.id, oldSession.id)
+        XCTAssertFalse(freshSession.hasDeferredMetricsChange)
+        XCTAssertNotEqual(freshModel, oldModel)
+        XCTAssertGreaterThan(
+            fixture.dragScrollView.runtime.capture.operationEpoch,
+            oldOperationEpoch
+        )
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === freshSession)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(fixture.dragScrollView.runtime.transition.driver)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertEqual(events.results.map(\.reason), [.dragRelease])
+        XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+
+        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === freshSession)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+    }
+
     func testDisabledParticipantBounceClampsOuterOffsetAtBothBoundaries() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300])
         let participant = makeScrollView(
@@ -1627,6 +3691,98 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
                 + participant.effectiveContentInset.bottom
                 - participant.bounds.height
         )
+    }
+
+    func testPanelOwnedBounceDoesNotApplyInnerFixedHeightCorrectionAtEitherBoundary() throws {
+        func driveScrollGeometry(_ dragScrollView: BODragScrollView, to offsetY: CGFloat) {
+            // `contentOffset` is pixel-quantized by UIScrollView, so it cannot inject the half-pixel
+            // residue this regression test needs. The scroll view's real geometry is its bounds;
+            // setting that origin preserves the requested sub-pixel value and does not synthesize a
+            // delegate callback, allowing this test to deliver exactly one deterministic sample.
+            var bounds = dragScrollView.bounds
+            bounds.origin.y = offsetY
+            dragScrollView.bounds = bounds
+            XCTAssertEqual(dragScrollView.contentOffset.y, offsetY, accuracy: 0.000_000_001)
+            dragScrollView.scrollViewDidScroll(dragScrollView)
+        }
+
+        func exerciseTopBoundary() throws {
+            let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+            let provider = SegmentProvider([
+                .init(displayHeight: 100, beginOffsetY: 0, endOffsetY: 600)
+            ])
+            dragScrollView.behaviorProvider = provider
+            layout(dragScrollView)
+            let participant = makeScrollView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+                contentHeight: 900
+            )
+            let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+            participant.addSubview(leafView)
+            panelView.addSubview(participant)
+            dragScrollView.beginCapture(from: leafView)
+            defer { dragScrollView.endCapture() }
+
+            let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+            let boundaryOffset = dragScrollView.minimumOuterOffset
+            XCTAssertNotNil(model.projection(at: boundaryOffset).fixedDisplayHeight)
+            driveScrollGeometry(dragScrollView, to: boundaryOffset)
+            let boundaryHeight = dragScrollView.displayHeight
+            let boundaryPanelOrigin = panelView.frame.minY
+            let pixel = dragScrollView.comparisonPolicy.boundaryBand
+
+            for distance in [pixel * 0.5, pixel, pixel * 1.5] {
+                driveScrollGeometry(dragScrollView, to: boundaryOffset - distance)
+                XCTAssertEqual(panelView.frame.minY, boundaryPanelOrigin, accuracy: 0.000_001)
+                XCTAssertEqual(
+                    dragScrollView.displayHeight,
+                    boundaryHeight - distance,
+                    accuracy: 0.000_001
+                )
+            }
+        }
+
+        func exerciseBottomBoundary() throws {
+            let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+            var configuration = dragScrollView.configuration
+            configuration.bounce.preferredBottomOwner = .panel
+            dragScrollView.configuration = configuration
+            let provider = SegmentProvider([
+                .init(displayHeight: 300, beginOffsetY: 0, endOffsetY: 600)
+            ])
+            dragScrollView.behaviorProvider = provider
+            layout(dragScrollView)
+            let participant = makeScrollView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+                contentHeight: 900
+            )
+            let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+            participant.addSubview(leafView)
+            panelView.addSubview(participant)
+            dragScrollView.beginCapture(from: leafView)
+            defer { dragScrollView.endCapture() }
+
+            let model = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+            let boundaryOffset = dragScrollView.maximumOuterOffset
+            XCTAssertNotNil(model.projection(at: boundaryOffset).fixedDisplayHeight)
+            driveScrollGeometry(dragScrollView, to: boundaryOffset)
+            let boundaryHeight = dragScrollView.displayHeight
+            let boundaryPanelOrigin = panelView.frame.minY
+            let pixel = dragScrollView.comparisonPolicy.boundaryBand
+
+            for distance in [pixel * 0.5, pixel, pixel * 1.5] {
+                driveScrollGeometry(dragScrollView, to: boundaryOffset + distance)
+                XCTAssertEqual(panelView.frame.minY, boundaryPanelOrigin, accuracy: 0.000_001)
+                XCTAssertEqual(
+                    dragScrollView.displayHeight,
+                    boundaryHeight + distance,
+                    accuracy: 0.000_001
+                )
+            }
+        }
+
+        try exerciseTopBoundary()
+        try exerciseBottomBoundary()
     }
 
     func testForcedInnerTopBounceUsesCurrentExactDetentAsCaptureMinimum() throws {
@@ -2156,6 +4312,36 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         standalone.finishRecognition()
     }
 
+    func testStaleSystemAnimationEndDoesNotArmTouchCompletion() throws {
+        let dragScrollView = BODragScrollView(frame: viewport)
+        let recognizer = try XCTUnwrap(
+            dragScrollView.gestureRecognizers?.compactMap {
+                $0 as? TouchCompletionGestureRecognizer
+            }.first
+        )
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertEqual(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+
+        dragScrollView.scrollViewDidEndScrollingAnimation(dragScrollView)
+
+        XCTAssertEqual(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+        XCTAssertFalse(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+    }
+
+    func testReplacingSystemAnimationDriverClearsTouchCompletionTimestamp() {
+        let dragScrollView = BODragScrollView(frame: viewport)
+        dragScrollView.runtime.transition.driver = .systemAnimation
+        dragScrollView.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
+
+        // A valid callback from the old animation may have armed touch completion immediately
+        // before another movement replaces that driver. Once ownership changes, the timestamp no
+        // longer describes the current interaction and must be invalidated with the driver.
+        dragScrollView.interruptActiveMovement(outcome: .interrupted)
+
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertEqual(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+    }
+
     // MARK: - Fixtures
 
     private func makeHost(
@@ -2187,6 +4373,167 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         window.makeKeyAndVisible()
         layout(dragScrollView)
         return window
+    }
+
+    private func beginDragDeceleration(
+        on dragScrollView: BODragScrollView,
+        targetOffsetY: CGFloat
+    ) throws {
+        var target = CGPoint(x: dragScrollView.contentOffset.x, y: targetOffsetY)
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: .zero,
+            targetContentOffset: &target
+        )
+        _ = try XCTUnwrap(
+            dragScrollView.runtime.transition.activeTransaction?.id
+        )
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: true)
+        XCTAssertTrue(dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .dragDeceleration)
+    }
+
+    private func makeCapturedParticipantFixture() throws -> (
+        dragScrollView: BODragScrollView,
+        panelView: UIView,
+        participant: UIScrollView,
+        leafView: UIView,
+        window: UIWindow
+    ) {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+        _ = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        XCTAssertTrue(dragScrollView.hasParticipantSegments)
+        return (dragScrollView, panelView, participant, leafView, window)
+    }
+
+    private func makeAutomaticBottomInnerOverscrollFixture() throws -> (
+        dragScrollView: BODragScrollView,
+        panelView: UIView,
+        participant: UIScrollView,
+        leafView: UIView,
+        window: UIWindow,
+        maximumOuterOffset: CGFloat,
+        participantMaximumOffset: CGFloat
+    ) {
+        let fixture = try makeCapturedParticipantFixture()
+        var configuration = fixture.dragScrollView.configuration
+        configuration.bounce.preferredBottomOwner = .innerScrollView
+        fixture.dragScrollView.configuration = configuration
+        fixture.dragScrollView.reloadScrollMetrics()
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+
+        let maximumOuterOffset = fixture.dragScrollView.maximumOuterOffset
+        let inset = fixture.participant.effectiveContentInset
+        let participantMaximumOffset = max(
+            -inset.top,
+            fixture.participant.contentSize.height
+                + inset.bottom
+                - fixture.participant.bounds.height
+        )
+        fixture.dragScrollView.contentOffset.y = maximumOuterOffset + 30
+        fixture.dragScrollView.scrollViewDidScroll(fixture.dragScrollView)
+
+        XCTAssertEqual(
+            fixture.dragScrollView.contentOffset.y,
+            maximumOuterOffset + 30,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            fixture.participant.contentOffset.y,
+            participantMaximumOffset + 30,
+            accuracy: 0.001
+        )
+        return (
+            fixture.dragScrollView,
+            fixture.panelView,
+            fixture.participant,
+            fixture.leafView,
+            fixture.window,
+            maximumOuterOffset,
+            participantMaximumOffset
+        )
+    }
+
+    private func makeBottomInnerOverscrollFixture() throws -> (
+        dragScrollView: BODragScrollView,
+        panelView: UIView,
+        participant: ContentOffsetRequestRecordingScrollView,
+        leafView: UIView,
+        provider: SegmentProvider,
+        window: UIWindow,
+        maximumOuterOffset: CGFloat,
+        participantMaximumOffset: CGFloat
+    ) {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        let participant = ContentOffsetRequestRecordingScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300)
+        )
+        participant.contentSize = CGSize(width: 320, height: 900)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        layout(dragScrollView)
+
+        var configuration = dragScrollView.configuration
+        configuration.bounce.preferredBottomOwner = .innerScrollView
+        dragScrollView.configuration = configuration
+
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participant.addSubview(leafView)
+        panelView.addSubview(participant)
+        dragScrollView.beginCapture(from: leafView)
+        _ = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        _ = try XCTUnwrap(dragScrollView.runtime.capture.session?.model)
+
+        let maximumOuterOffset = dragScrollView.maximumOuterOffset
+        let participantMaximumOffset = max(
+            -participant.effectiveContentInset.top,
+            participant.contentSize.height
+                + participant.effectiveContentInset.bottom
+                - participant.bounds.height
+        )
+        let overscrollDistance: CGFloat = 30
+        dragScrollView.contentOffset.y = maximumOuterOffset + overscrollDistance
+        dragScrollView.scrollViewDidScroll(dragScrollView)
+
+        XCTAssertEqual(
+            dragScrollView.contentOffset.y,
+            maximumOuterOffset + overscrollDistance,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            participant.contentOffset.y,
+            participantMaximumOffset + overscrollDistance,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
+
+        return (
+            dragScrollView,
+            panelView,
+            participant,
+            leafView,
+            provider,
+            window,
+            maximumOuterOffset,
+            participantMaximumOffset
+        )
     }
 
     private func makeScrollView(frame: CGRect, contentHeight: CGFloat) -> UIScrollView {

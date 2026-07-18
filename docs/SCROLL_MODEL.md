@@ -129,7 +129,13 @@ flowchart LR
 3. 位于 `Y` 之前的完整片段被设置到 `innerEnd`，其长度全部累加到 `T`。
 4. 命中的当前片段使用 `q = Y - outerStart` 计算部分进度。
 5. 后续片段保持各自尚未消费时的初始 offset。
-6. 最后统一计算 `H = V + Y - T`。
+6. 真正进入参与者片段后，直接采用该片段的标准 `displayHeight`，再由
+   `T = V + Y - H` 反推 panel translation；panel 区间和预进入区仍使用
+   `H = V + Y - T`。
+
+参与者片段内的 `displayHeight` 是模型权威值。直接使用它，可以避免相同高度经过多次
+加减后变成 `873.0000000000001`。这里不是把任意结果“显示成”标准值：panel frame
+仍按解析式真实写入，公开高度随后仍从真实几何读回。
 
 当同一个祖先在 child 前后拥有两个片段时，第 1 步尤其重要：后一个片段不能提前覆盖前一个片段已经投影出的部分进度。
 
@@ -143,6 +149,10 @@ Y + onePhysicalPixel >= outerStart
 
 所以 `q` 允许位于 `[-onePhysicalPixel, 0)`。实现故意不把这段进度截成 0，以复现源实现边界附近的交接行为。
 
+只有 `q` 距离 `0` 或片段长度这个已知端点严格小于 `0.0001pt` 时，模型才把局部
+算术尾差归一到最近端点。该操作不裁剪区间，也不修改 UIKit 的真实 offset；例如
+`q = -0.25` 在 2x 屏幕的预进入带内仍保持 `-0.25`。
+
 这不表示最终结果允许一个像素误差，也不是测试容差。它只是防止 Float 运算和 UIKit 抖动让“已经到边界”的分支反复失败。
 
 ### 4.2 零长度参与者片段
@@ -154,7 +164,9 @@ innerStart == innerEnd
 outerStart == outerEnd
 ```
 
-它仍是释放求解可识别的 participant anchor，但只有 `q > 0` 时 `Projection.isParticipantScrolling` 才为 true。仅落在一个物理像素带内不会被报告为“内部正在滚动”。
+它仍是释放求解可识别的 participant anchor。由于没有可消费的正长度，纯投影不会把
+它报告为 `isParticipantScrolling == true`；回弹是否交给内部 scroll view，由 UIKit 层的
+bounce 分配另行决定。
 
 ## 5. 参与者可滚范围与自动建段
 
@@ -189,9 +201,13 @@ bounces && alwaysBounceVertical
 | `.afterPanelFullyDisplayed` | 第一个足以完整展示内部 scroll view 的已规范化 detent；找不到时使用原生计算出的最大配置高度 |
 | `.automatic` | 从当前 detent 向上寻找可展示至少 `minimumInnerVisibilityRatio` 的位置，默认比例 0.7；若回退当前位置则保留原生 `CGFloat` |
 
-`.automatic` 找不到合格 detent 时，会检查“完整展示高度”下方的 detent；仍不满足比例则回退到触摸时高度。
+`.automatic` 先寻找当前高度附近的 detent：若最近点与当前高度严格相差不到一个物理
+像素，就从该场景点开始；否则恢复向上的 ceil 语义。找不到合格 detent 时，会检查
+“完整展示高度”下方的 detent；仍不满足比例则回退到触摸时高度。
 
-当 `forcesInnerTopBounce` 开启、当前高度又严格等于非首个 detent 时，智能建段临时只使用“当前 detent 到最大 detent”的后缀，使当前高度成为本次 capture 组合轴的下边界。这个筛选使用源数值的严格相等，不使用一个物理像素带；provider 显式片段和 `.atDisplayHeight` 固定放置仍使用完整 detent 列表。
+当 `forcesInnerTopBounce` 开启、当前高度属于非首个 detent 的严格一物理像素场景带时，
+智能建段临时只使用“当前 detent 到最大 detent”的后缀，使当前高度成为本次 capture
+组合轴的下边界。provider 显式片段和 `.atDisplayHeight` 固定放置仍使用完整 detent 列表。
 
 ### 5.2 无 detent 不等于无联动
 
@@ -209,6 +225,9 @@ activationHeight = currentDisplayHeight
 - 目标展示高度仍通过组合模型投影计算，避免把内部已经消耗的距离重复算到面板高度。
 
 `minimumDisplayHeight` 只在无 detent 时决定面板轴的有效下边界，默认有效值为 66pt。
+
+无 detent 时，显式调用 `settleToNearestDetent` 同样是 no-op：不创建 movement
+transaction，也不调用 completion。
 
 ### 5.3 显式片段
 
@@ -258,9 +277,12 @@ flowchart LR
 
 `rebuildCaptureSessionIfNeeded(reason:)` 不会盲目把新模型从零开始安装。它先把当前参与者 offset 反投影到候选组合轴位置，再验证：
 
-1. 当前参与者 offsets 是否等于候选 `Projection.participantOffsets`；
-2. 候选展示高度是否等于当前真实展示高度；
+1. 当前参与者 offsets 是否与候选 `Projection.participantOffsets` 数值相等；
+2. 候选展示高度是否与当前真实展示高度数值相等；
 3. 同一祖先的多个片段是否构成合法已消费前缀。
+
+这里的“数值相等”是严格小于 `0.0001pt`，不是一个物理像素。参与者 offset 只在
+接近明确的片段端点时参与本次局部模型归一，组件不会为了判断兼容而改写真实 offset。
 
 若不兼容，`offsetMismatch` 决定处理：
 
@@ -285,6 +307,11 @@ outer contentOffset.y
 
 若 provider 指定的激活高度超出普通 detent 范围，外层 `contentInset.top/bottom` 会扩展，使模型中第一到最后一个坐标都可实际到达。
 
+普通 capture rebuild 成功安装后会自行发布真实高度；`.layout` rebuild 只负责形成模型和几何，
+最终修正与发布交回外层 layout pass，避免业务看到中间状态。participant setter 的同步回调若创建
+新 transaction，layout 通过 transaction epoch 放弃旧目标修正；只有更新的 transaction 仍在运行
+时才让其继续拥有发布权，若它已同步取消或结束，layout 仍发布当前真实几何。
+
 ## 8. 高频滚动与回弹分配
 
 正常区间内，`scrollViewDidScroll` 只做：
@@ -297,12 +324,38 @@ panelView.frame.minY = Projection.panelTranslation
 
 写入顺序固定为“先面板 frame，再参与者 offset”。某些 UIKit scroll 子类会在布局时自行校正 offset，反过来写容易制造旧几何回调。
 
-外层 offset 超过 `[minimumOuterOffset, maximumOuterOffset]` 时，`BODragScrollScrolling.projectedState` 分配 overscroll：
+### 8.1 已知目标的真实 frame 尾差修正
 
-- 若策略选择 panel，保留边界投影，额外位移由 panel 展示承担。
-- 若策略选择内部且主参与者允许 bounce，额外距离加到主参与者 offset，并同步调整 panel translation，使展示高度保持边界值。
+仅在目标高度有明确权威来源时（例如参与者段标准高度、layout proposed height 或 resolved
+programmatic target），第一次 frame 写入后才复读真实几何；真实高度与目标的残差严格小于一个
+物理像素时，可对 frame 做一次修正，随后仍以真实几何作为公开 `displayHeight`。调用场景是：
+
+1. 正常固定高度参与者段与 inner-owned bounce；
+2. `.layout` capture rebuild 完成，且外层 layout 仍持有原 transaction epoch；
+3. 屏幕上的 system-scroll 程序化移动，其 target offset 与当前 offset 精确相同，UIKit 不会产生自然滚动回调。
+
+一个物理像素只是允许尝试修正的准入边界，不表示公开高度可以保留一个像素误差。非动画同 offset
+移动不额外收口；panel-owned bounce 也不使用固定高度修正；动画结束后更不会再次改写 offset/frame。
+
+外层 offset 超过 `[minimumOuterOffset, maximumOuterOffset]` 时，`BODragScrollScrolling.projectedState` 以纯计算方式分配 overscroll。若某种策略要求钳制 host，它只在结果中返回 `correctedOuterOffsetY`，由正常 `scrollViewDidScroll` owner 执行写入；metrics 恢复等旁路调用不会暗中修改 host：
+
+- 若策略选择 panel，参与者 offsets 和 panel translation/frame 保持边界值，清除 `fixedDisplayHeight`，令 `activeOwner = panel`、`isParticipantScrolling = false`；顶部展示高度为 `boundaryHeight - extensionDistance`，底部为 `boundaryHeight + extensionDistance`。因此即使距离小于一个物理像素，也不会被参与者段修正拉回边界。
+- 若策略选择内部且主参与者允许 bounce，额外距离加到主参与者 offset，并同步调整 panel translation；该路径保留边界投影已有的 `fixedDisplayHeight`（若存在），使真实展示高度保持边界值。
 - 若策略选择内部但参与者不允许 bounce，外层 offset 被钳回边界。
 - `forcesInnerTopBounce` 会覆盖普通顶部 owner 偏好。
+
+host 始终是组合滚动的唯一物理 driver。`scrolling.overscroll` 只缓存当前边、owner、标准边界和真实距离；participant 即使显示内部 bounce，也只是 host offset 的投影结果，不单独启动第二套减速。释放目标只读使用按下时的缓存模型，不会从临时 bounce offset 重建数学轴。
+
+participant 的 `contentSize/contentInset/adjustedContentInset` 若在该物理生命周期中改变，只标记当前
+session 的 metrics 已过期，不在 tracking/deceleration/bounce 中重建。若 UIKit 因内容收缩同步夹回
+participant offset，则以旧模型在当前 host offset 的投影只恢复发生变化的 participant；host 和其它
+参与者保持不动。旧模型负责把本次运动完整结算，清理使用新 standalone range。旧 owner 期间的新
+touch-down 即使命中不同 sibling chain 也不换轴；实际进入新 drag 后才用当前 metrics 和 touched view
+创建 fresh session，仅 tracking 则仍由旧模型结算。
+
+configuration、detent 或 behavior provider 改变时，新的策略对象立即参与后续决策，但旧物理生命周期的组合轴、inset 与 panel sizing 保持不可变；capture 结束后再用 `.configuration` 原因重建/布局。显式布局失效和 viewport 改变是结构性事件，可以主动中断并立即重算。
+
+若 UIKit 在 `didEndDragging(false)` 或 `didEndDecelerating` 后仍留下真实 host overscroll，Transition 保留 capture，让 host 回到标准边界；逐帧仍复用上述投影。到达边界后才做 `settled` teardown。只有 panel/window/层级/新 owner 等结构性中断走 `forced` teardown。
 
 没有组合模型时只执行 panel bounce 约束；禁止某一侧 panel bounce 时，通过移动 panel frame 抵消外层超出距离。
 
@@ -366,7 +419,12 @@ a <= Y <= b: H = Hs
 Y > b       : H = Hs + Y - b
 ```
 
-最终 behavior provider 若再次修改外层 target，则不再沿用旧 `targetDisplayHeight`，而是重新调用完整模型投影。
+组件先保存纯求解器与参与者 delegate 得到的外层 target，再调用最终 behavior provider。
+只有 provider 完全没有修改该 target，且 target 精确落在选中片段端点时，最终高度才
+直接使用该片段的标准 `displayHeight`。这样已知落点不会被重复轴运算制造尾差。
+
+provider 只要把 target 改成任何不同的真实值，即使差异很小，也视为明确的外部意图，
+最终高度按修改后的真实 target 重新投影，不会被数值容差吞掉。
 
 ## 10. 参与者 delegate 与最终 provider 的调整顺序
 
@@ -375,15 +433,15 @@ Y > b       : H = Hs + Y - b
 1. 纯 `TargetSolver` 得到组合轴目标。
 2. 始终把 `scrollViewWillEndDragging` 转发给本次生命周期绑定的主参与者 delegate。
 3. 只有目标仍落在主参与者自己的选中片段时，才接受 delegate 对内部 target 的修改。
-4. 将内部改变量换算成外层改变量，并限制在同一片段内。
+4. 参与者 target 使用精确 `!=` 判断是否被修改；修改后换算成外层改变量，并限制在同一片段内。
 5. `behaviorProvider.adjustTargetContentOffset` 获得最后一次同步调整机会。
-6. 对非有限坐标做回退，并重新投影最终展示高度。
+6. 对非有限坐标做回退；未被 provider 修改的已知端点采用模型标准高度，其余目标重新投影。
 
 祖先拥有的片段不会通过主参与者的 offset 空间接受 delegate 修改。
 
 ## 11. 数值语义不是“允许误差”
 
-实现明确区分三种数值规则：
+实现明确区分四种数值规则：
 
 ### 11.1 输入表示
 
@@ -412,15 +470,26 @@ boundaryBand = 1 / displayScale
 
 它用于片段进入、锚点合并、边界归类和“是否完整展示”等离散分支，目的是消除计算抖动导致的判定失败。
 
-### 11.3 极小 jitter band
+### 11.3 严格数值相等
 
 ```text
-jitterEpsilon = 0.01
+abs(a - b) < 0.0001pt
 ```
 
-它只用于抑制同一次 UIKit 状态更新中的重复发布、验证当前投影和判断动画终值。它与物理像素带是两个不同算法概念。
+它用于明确的局部数值问题：已知端点算术尾差归一、捕获模型兼容性、
+`didChangeDisplayHeight` 值变化通知去重，以及 movement 结果验证。它不会把任意范围值
+吸到附近端点，也不会过滤系统 `didScroll`、拖拽或 movement 生命周期。
 
-结构正确性不使用这两种带：detent 必须严格递增；同一参与者片段不能回退或重叠；所有输入和组合轴运算必须有限。
+`displayHeight` 本身始终按真实 `!=` 保存最新几何；值变化通知与“上次已通知高度”比较，
+因此多个不足阈值的小变化可以累计后再产生一次通知。
+
+### 11.4 外部目标与系统事件使用精确比较
+
+参与者 delegate 和 behavior provider 是否修改 target、UIKit target 是否真的不同于当前
+offset，均使用精确 `==` / `!=`。外部哪怕只改动极小量也必须保留；释放目标是一项事件
+意图，不是值变化通知，同高度目标同样可以产生完整 movement 生命周期。
+
+结构正确性不使用任何容差：detent 必须严格递增；同一参与者片段不能回退或重叠；所有输入和组合轴运算必须有限。
 
 ## 12. 失败、边界与降级原则
 
@@ -433,6 +502,8 @@ jitterEpsilon = 0.01
 - `innerFirst`，或 `innerFirstAtBoundary` 且内部仍能消耗手势：保留捕获身份但停用组合模型，由原生内部滚动负责。
 - 没有捕获会话但有 detent：释放时构建仅含 panel anchors 的临时模型，吸附行为不依赖是否碰巧捕获到内部 scroll view。
 - 程序化 `move(toDisplayHeight:)` 是 panel-only 绝对移动：先结束 capture，再按面板轴限制目标；它不会把参与者距离混入请求高度。
+- 动画执行时只把规范后的真实 target 交给 UIKit。动画结束不另行强制改写 offset/frame，
+  也不使用 CADisplayLink 维护第二份展示高度；终态来自 UIKit 的实际 offset 和真实几何读回。
 
 ## 13. 必须维持的模型不变量
 
@@ -444,8 +515,9 @@ jitterEpsilon = 0.01
 4. 同一参与者的 inner ranges 不回退、不重叠。
 5. 同一真实 scroll view 无论拥有多少片段，都只得到一个最终 offset。
 6. 无 detent 只关闭吸附，不关闭组合滚动。
-7. 一个物理像素和 0.01 jitter 都只能用于各自的离散判断，不能放宽结构校验。
-8. 所有 provider/delegate 调整后必须重新确认状态未被同步回调替换，并拒绝非有限目标。
+7. 一个物理像素只用于离散场景或真实几何修正的准入；`0.0001pt` 数值相等只用于明确的局部数值语义，二者都不能放宽结构校验。
+8. 外部 target 修改和系统生命周期使用精确比较，不得被上述数值带过滤。
+9. 所有 provider/delegate 调整后必须重新确认状态未被同步回调替换，并拒绝非有限目标。
 
 相关纯模型和求解验证位于：
 

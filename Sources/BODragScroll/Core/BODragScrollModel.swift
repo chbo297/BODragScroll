@@ -61,15 +61,15 @@ struct ScrollSourceScalar: Equatable {
     }
 }
 
-/// The three distinct comparison modes used by the source implementation.
-/// They are algorithm decisions, not test tolerances.
+/// The two tolerance-based comparison modes used by the source implementation.
+/// Exact UIKit target/lifecycle decisions deliberately use `==` / `!=` instead.
 struct ScrollComparisonPolicy: Equatable {
-    let displayScale: CGFloat
-    let jitterEpsilon: CGFloat
+    static let valueEqualityTolerance: CGFloat = 0.0001
 
-    init(displayScale: CGFloat, jitterEpsilon: CGFloat = 0.01) {
-        self.displayScale = displayScale
-        self.jitterEpsilon = jitterEpsilon
+    let displayScale: CGFloat
+
+    init(displayScale: CGFloat) {
+        self.displayScale = displayScale.isFinite && displayScale > 0 ? displayScale : 1
     }
 
     var boundaryBand: CGFloat {
@@ -77,13 +77,27 @@ struct ScrollComparisonPolicy: Equatable {
     }
 
     @inline(__always)
-    func isJitterEqual(_ lhs: CGFloat, _ rhs: CGFloat) -> Bool {
-        abs(lhs - rhs) <= jitterEpsilon
+    func isValueEqual(_ lhs: CGFloat, _ rhs: CGFloat) -> Bool {
+        abs(lhs - rhs) < Self.valueEqualityTolerance
     }
 
     @inline(__always)
     func isWithinBoundaryBand(_ lhs: CGFloat, _ rhs: CGFloat) -> Bool {
-        abs(lhs - rhs) <= boundaryBand
+        abs(lhs - rhs) < boundaryBand
+    }
+
+    /// Removes only arithmetic residue at the nearest known endpoint. It never clamps a range and
+    /// never changes the backing UIScrollView offset from which the local value was derived.
+    @inline(__always)
+    func snappingToNearestEndpoint(
+        _ value: CGFloat,
+        _ endpointA: CGFloat,
+        _ endpointB: CGFloat
+    ) -> CGFloat {
+        let distanceA = abs(value - endpointA)
+        let distanceB = abs(value - endpointB)
+        let nearestEndpoint = distanceA <= distanceB ? endpointA : endpointB
+        return isValueEqual(value, nearestEndpoint) ? nearestEndpoint : value
     }
 }
 
@@ -492,6 +506,9 @@ struct Projection: Equatable {
     let outerOffset: CGFloat
     let panelTranslation: CGFloat
     let displayHeight: CGFloat
+    /// The model-authoritative height while the outer axis is actually inside an inner-scroll
+    /// segment. Nil in the deliberate one-pixel pre-entry band and in panel-owned regions.
+    let fixedDisplayHeight: CGFloat?
     let activeOwner: SegmentOwner
     /// Mirrors the source's `isinnersc = (exty > 0)` decision. In particular,
     /// merely being inside the one-pixel band of a zero-length drag-inner
@@ -529,6 +546,7 @@ struct ScrollModel: Equatable {
         var panelTranslation: CGFloat = 0
         var activeOwner: SegmentOwner = .panel
         var isParticipantScrolling = false
+        var fixedDisplayHeight: CGFloat?
 
         var iterator = segments.lazy.filter(\.isParticipantSegment).makeIterator()
         var currentSegment = iterator.next()
@@ -551,7 +569,11 @@ struct ScrollModel: Equatable {
                 continue
             }
 
-            let progress = outerOffset - segment.outerStart
+            let progress = comparison.snappingToNearestEndpoint(
+                outerOffset - segment.outerStart,
+                0,
+                segment.innerLength
+            )
             if progress > segment.innerLength {
                 offsets[id] = segment.innerEnd
                 panelTranslation += segment.innerLength
@@ -565,6 +587,9 @@ struct ScrollModel: Equatable {
             panelTranslation += progress
             activeOwner = segment.owner
             isParticipantScrolling = progress > 0
+            if progress >= 0, segment.displayHeight.isFinite {
+                fixedDisplayHeight = segment.displayHeight
+            }
             break
         }
 
@@ -578,10 +603,20 @@ struct ScrollModel: Equatable {
             return ParticipantProjection(participantID: id, contentOffset: offset)
         }
 
+        // Inside an inner segment, derive the panel frame directly from that segment's standard
+        // display height. This is algebraically equivalent to accumulated participant distance but
+        // avoids manufacturing a tail such as 873.0000000000001 from repeated add/subtract steps.
+        let resolvedPanelTranslation = fixedDisplayHeight.map {
+            viewportHeight + outerOffset - $0
+        } ?? panelTranslation
+        let resolvedDisplayHeight = fixedDisplayHeight
+            ?? (viewportHeight + outerOffset - resolvedPanelTranslation)
+
         return Projection(
             outerOffset: outerOffset,
-            panelTranslation: panelTranslation,
-            displayHeight: viewportHeight + outerOffset - panelTranslation,
+            panelTranslation: resolvedPanelTranslation,
+            displayHeight: resolvedDisplayHeight,
+            fixedDisplayHeight: fixedDisplayHeight,
             activeOwner: activeOwner,
             isParticipantScrolling: isParticipantScrolling,
             participantOffsets: participantOffsets

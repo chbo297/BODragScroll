@@ -97,8 +97,8 @@ flowchart TD
 | `panel` | View/Layout | 上次 bounds、首次布局、待布局高度、panel 替换代次 |
 | `capture` | Capture | session、KVO、操作 epoch、窗口切换暂停状态 |
 | `drag` | View/Scrolling | 最近一次运动来源 |
-| `scrolling` | Scrolling | 错位恢复方向、回调 epoch、内部滚动发布状态 |
-| `transition` | Transition | transaction、驱动、动画监视、拖拽与减速配对 |
+| `scrolling` | Scrolling | 错位恢复方向、回调 epoch、overscroll 边/owner、内部滚动发布状态 |
+| `transition` | Transition | transaction、唯一物理 driver、capture cleanup generation、pending layout movement/interruption、动画监视、拖拽与减速配对及布局延迟队列 |
 | `interaction` | Interaction | 触摸补完手势、Web 命中、延迟 UIControl |
 | `debug` | Diagnostics（仅 DEBUG） | 日志 sink 和触摸序列号 |
 
@@ -116,6 +116,16 @@ flowchart TD
 
 Session 使用弱引用，不延长业务视图生命周期。每次捕获、重建或清理都会推进 operation epoch；调用 provider、participant delegate 或 UIKit setter 后必须再次校验 session、epoch 和层级，防止同步重入的旧调用覆盖新状态。
 
+一次 tracking/deceleration/bounce 生命周期使用不可变的 touch-down 模型。期间观察到 participant
+metrics 变化时，session 只标记 dirty；旧 owner 活动时的新 touch-down 即使命中另一条 sibling chain
+也不换轴。若触摸真的进入 drag，先中断旧 driver，再从当前 metrics 和本次 touched view 创建 fresh
+session；若只是 tracking 后抬起，旧 session 继续结算。当前物理 owner 结束时按新独立范围安全释放。
+它既避免在高频路径重建，也避免把临时回弹几何当成永久模型输入。
+
+configuration、detent 和 behavior provider 的对象与决策版本立即可见，但依赖它们的组合轴、inset 和 provider sizing 在物理 owner 结束前延迟应用。显式布局失效和 viewport 改变仍是结构性中断，可立即重建。这样“策略已经换新”与“旧手势继续使用不可变几何”边界明确，也不需要维护第二份展示高度。
+
+Transition 的 driver 表示真实物理运动，movement transaction 表示一次可完成的公开意图，两者不是强制一一对应：UIKit 省略 `willEndDragging` 时可以只有原生减速 driver。driver 及其监控键通过唯一原子入口释放，因此自然结束、窗口移除和新手势接管都不会留下“永久减速”状态。
+
 ## 8. 决策输入与事件输出
 
 组件刻意拆开两个协议：
@@ -125,16 +135,24 @@ Session 使用弱引用，不延长业务视图生命周期。每次捕获、重
 
 这样可以避免一个 delegate 同时既修改决策又消费结果。任何 provider 回调都可能重入，因此调用前后使用 `BODragScrollDecisionStateToken` 验证几何和策略输入是否仍是同一版本。
 
+事件也按语义分开：只有 `didChangeDisplayHeight` 是值变化通知；`didScroll` 和拖拽、
+减速、movement 生命周期按事件如实发送，不以高度近似相等为由过滤。
+
 ## 9. 关键不变量
 
 1. `panelView` 尺寸在一次运动中保持固定；展示变化来自外部 offset 与 panel translation。
-2. `displayHeight` 来自当前几何或同一模型投影，不从未初始化/可选的吸附结果推断。
+2. `displayHeight` 来自真实几何读回或模型明确持有的权威高度；参与者固定高度段和未被外部修改的已知吸附端点直接使用标准模型值，不通过重复轴运算制造浮点尾差。`fixedDisplayHeight` 只属于正常参与者段和 inner-owned bounce；panel-owned bounce 必须清除它，因为此时真实展示高度正在连续变化。
 3. `UIScrollView.delegate` 由组件自己持有；业务只能使用 provider 和 event delegate。
 4. 一个 capture session 的 `ParticipantID` 稳定，Core 不依赖对象指针。
 5. `ScrollSegment` 按组合外轴有序，内部区间长度非负，同一参与者的区间不倒退或重叠。
 6. 无 detent 表示连续面板，不表示禁用内部联动；有可参与内部范围时仍建立 participant segment，但松手不吸附。
 7. 高频 `scrollViewDidScroll` 先更新 panel frame，再写参与者 offset，避免特殊 ScrollView 在布局时校正 offset 造成顺序错误。
-8. 每个移动 transaction 最多完成一次；替换请求、移出窗口和布局失效会显式结束旧事务。
+8. 每个移动 transaction 最多完成一次；替换请求和移出窗口会显式结束旧事务。布局失效先冻结旧事务，待新布局形成一致几何后再完成它；布局期间创建的新 movement 不能被旧 layout 修正或发布覆盖。
+9. 一个物理像素只服务于离散场景归属，或作为一次真实 frame 尾差修正的准入边界；严格数值相等是独立的小量级，外部 target 修改则始终使用精确比较。
+10. capture rebuild 中的 participant setter 是 callback-bearing 边界；layout 同时使用 panel generation 和 transaction epoch 判断自己是否仍拥有最终修正权。epoch 前进但新 transaction 已同步结束时，layout 仍发布真实几何读回，避免公开状态停留在旧值。
+11. 释放目标解析是对按下时缓存模型的只读操作；`willEndDragging` 不得用 bounce/deceleration 中的临时 offset 重建模型或修改真实几何。
+12. 组合滚动只有 host 一个物理 driver。participant bounce 是 host offset 的投影；正常减速/回弹到合法边界后才 `settled` 清理，结构性中断才 `forced` 清理。
+13. 新触摸接管减速时，同链只刷新 session generation 并保留当前模型；旧 transaction、迟到 callback 和异步 sample 必须通过 transaction/driver/session-generation 全部校验，不能清理新 owner。
 
 ## 10. 为什么 Swift 不存在 OC 本次回归
 
@@ -143,7 +161,7 @@ Swift 的“是否建立参与段”和“是否存在 detent”是两条独立�
 - `makeParticipantSegments` 只要捕获对象可参与，且没有有效显式区间，就会生成默认 participant segment；
 - `automaticActivationScalar` 在 detent 为空时选择 `.native(currentDisplayHeight)`；
 - `TargetSolver` 在没有 detent 时原样保留系统预测，不进行吸附；
-- `ResolvedReleaseTarget` 是完整值类型，最终高度统一来自 `model.projection(at:)`。
+- `ResolvedReleaseTarget` 是完整值类型：普通目标来自模型投影；组件选中的已知片段端点直接使用标准高度；behavior provider 精确修改后的目标始终按真实 offset 重新投影。
 
 因此不会出现“无 detent 导致没有内部段”，也不存在 OC 的未初始化 `attachInfo` 输出。
 

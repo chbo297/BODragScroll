@@ -133,6 +133,7 @@ dragScrollView.reloadScrollMetrics()
 - 新请求、移除窗口或替换 `panelView` 会以 `.interrupted` 结束旧请求。
 - 非法非有限高度以 `.cancelled` 结束，不进入动画。
 - 布局前调用会保存意图，并在首次有效布局后执行。
+- 没有 detent 时，`settleToNearestDetent` 是 no-op，不创建 transaction 或调用 completion。
 
 ## 运行机制
 
@@ -150,12 +151,14 @@ dragScrollView.reloadScrollMetrics()
 
 公开 detent 和显式内部区间保留 Objective-C `NSNumber.floatValue` 的 Float32 输入语义。
 
-实现中有两种不同的数值带：
+实现中区分两种内部近似判断和一种精确意图判断：
 
 - 一个物理像素：用于“是否进入区间、是否位于边界”等运行时分支判定。
-- 极小 jitter band：用于抑制同一次 UIKit 更新中的浮点抖动和重复回调。
+- 严格小量级数值相等：只用于已知端点尾差、模型兼容、展示高度值变化通知和终态验证。
+- 精确 `==` / `!=`：用于识别外部 target 修改以及系统目标是否真的发生移动。
 
-它们都不是允许业务结果偏差的测试容差。模型的排序、有限性和区间单调性仍使用严格结构校验。
+它们都不是允许业务结果偏差的测试容差。`didScroll` 和拖拽/移动生命周期不会按高度
+去重；模型的排序、有限性和区间单调性仍使用严格结构校验。
 
 原项目的默认手感参数保持为：低速阈值 `0.2`、高速阈值 `2.2`、相邻边界距离 `86pt`、面板进入内部区间的捕获距离 `140pt`。
 
@@ -214,7 +217,7 @@ xcodebuild -scheme BODragScroll \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 ```
 
-当前验证包含 41 条纯 Swift 数学/模型/求解器测试和 70 条 iOS UIKit 集成测试，覆盖 Float32 与原生 CGFloat 来源语义、物理像素判定带、无吸附点联动、嵌套三层片段顺序、同一祖先的非连续区间、目标求解阈值、完成回调一次性、首次布局移动、响应链捕获与跨容器接管、Web 单候选 provider 回调、投影写入顺序、状态恢复、重入/析构生命周期和 accessibility。
+当前验证包含 44 条纯 Swift 数学/模型/求解器测试和 80 条 iOS UIKit 集成测试，覆盖 Float32 与原生 CGFloat 来源语义、物理像素判定带、无吸附点联动、嵌套三层片段顺序、同一祖先的非连续区间、目标求解阈值、完成回调一次性、首次布局移动、响应链捕获与跨容器接管、Web 单候选 provider 回调、投影写入顺序、状态恢复、重入/析构生命周期和 accessibility。
 
 ## License
 

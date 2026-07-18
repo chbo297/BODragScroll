@@ -119,19 +119,16 @@ final class BODragScrollTransitionState {
     var systemAnimationTransactionID: UInt64?
     var systemAnimationTargetOffsetY: CGFloat?
     var systemAnimationSettlementMonitorTransactionID: UInt64?
-    var systemAnimationDidReceiveEndCallback = false
     var systemAnimationStartOffsetY: CGFloat?
     var systemAnimationHasObservedProgress = false
     var scrollToTopTargetOffsetY: CGFloat?
     var scrollToTopSettlementMonitorTransactionID: UInt64?
-    var scrollToTopDidReceiveEndCallback = false
     var scrollToTopStartOffsetY: CGFloat?
     var scrollToTopHasObservedProgress = false
 
-    var dragStartDisplayHeight: CGFloat?
-    var dragDisplayHeightDidChange = false
     var forwardedDragLifecycleToParticipant = false
     weak var forwardedParticipant: UIScrollView?
+    var forwardedDragBeginToEventDelegate = false
     var lastSystemAnimationEndTimestamp: TimeInterval = 0
     var isUserDragLifecycleActive = false
     var isEmittingTerminalDragLifecycleCallback = false
@@ -347,6 +344,8 @@ extension BODragScrollView {
         options: BODragScrollMovementOptions = .init(),
         completion: ((BODragScrollMovementResult) -> Void)? = nil
     ) -> CGFloat {
+        // Like OC `takeAttach`, an empty detent list has no legal attach target and is a no-op.
+        guard !runtimeDetentHeights.isEmpty else { return displayHeight }
         if !runtime.transition.pendingLayoutInterruptions.isEmpty
             || runtime.transition.isCompletingLayoutInterruptions {
             runtime.transition.movementsDeferredUntilLayoutInterruptionEnds.append { [weak self] in
@@ -390,28 +389,6 @@ extension BODragScrollView {
         reloadScrollMetrics()
         // Rebuilding geometry may synchronously emit a callback which starts a newer movement.
         guard runtime.transition.activeTransaction === transaction else {
-            return displayHeight
-        }
-
-        guard !detentHeights.isEmpty else {
-            let announcementState = decisionStateToken()
-            transaction.announceResolvedTarget(displayHeight, on: self)
-            guard runtime.transition.activeTransaction === transaction,
-                  decisionStateToken() == announcementState else {
-                if runtime.transition.activeTransaction === transaction {
-                    finishActiveMovement(
-                        transactionID: transaction.id,
-                        outcome: .cancelled,
-                        finalDisplayHeight: displayHeightForCurrentGeometry
-                    )
-                }
-                return displayHeight
-            }
-            finishActiveMovement(
-                transactionID: transaction.id,
-                outcome: .completed,
-                finalDisplayHeight: displayHeight
-            )
             return displayHeight
         }
 
@@ -562,29 +539,35 @@ extension BODragScrollView {
     func abortUserDragLifecycleForRemoval() {
         let wasTrackingLifecycle = runtime.transition.isUserDragLifecycleActive
         let wasAwaitingDeceleration = runtime.transition.isAwaitingDidEndDecelerating
+        let wasEmittingTerminalCallback = runtime.transition
+            .isEmittingTerminalDragLifecycleCallback
         let participant = runtime.transition.forwardedDragLifecycleToParticipant
             ? runtime.transition.forwardedParticipant
             : nil
+        let shouldForwardHostDragEnd = runtime.transition.forwardedDragBeginToEventDelegate
         let captureOwnership = takeCaptureCleanupOwnership()
 
-        runtime.transition.dragStartDisplayHeight = nil
-        runtime.transition.dragDisplayHeightDidChange = false
         runtime.transition.isAwaitingDidEndDecelerating = false
         runtime.transition.isEmittingTerminalDragLifecycleCallback = false
         runtime.transition.forwardedDragLifecycleToParticipant = false
         runtime.transition.forwardedParticipant = nil
+        runtime.transition.forwardedDragBeginToEventDelegate = false
 
         // UIKit is not required to deliver the terminal delegate callbacks after removal. Close the
-        // exact lifecycle we forwarded so participant delegates never remain logically dragging.
-        if wasTrackingLifecycle {
+        // exact lifecycle we forwarded so delegates never remain logically dragging. If removal
+        // happens inside a terminal callback, that callback's local stack still owns delivery and
+        // must not be duplicated here.
+        if wasTrackingLifecycle, !wasEmittingTerminalCallback {
             if let participant {
                 participant.delegate?.scrollViewDidEndDragging?(
                     participant,
                     willDecelerate: false
                 )
             }
-            eventDelegate?.dragScrollViewDidEndDragging(self, willDecelerate: false)
-        } else if wasAwaitingDeceleration {
+            if shouldForwardHostDragEnd {
+                eventDelegate?.dragScrollViewDidEndDragging(self, willDecelerate: false)
+            }
+        } else if wasAwaitingDeceleration, !wasEmittingTerminalCallback {
             if let participant {
                 participant.delegate?.scrollViewDidEndDecelerating?(participant)
             }
@@ -652,25 +635,31 @@ extension BODragScrollView {
         }
     }
 
-    /// Called by the display-height setter when a drag has traversed a distinct height, even if it
-    /// later returns to its starting value before release.
-    func transitionDidChangeDisplayHeightDuringDrag() {
-        guard runtime.transition.dragStartDisplayHeight != nil else { return }
-        runtime.transition.dragDisplayHeightDidChange = true
-    }
-
-    /// A same-gesture capture refresh remains owned by that drag. A capture created from a terminal
-    /// callback is a newer intention and deliberately keeps its new generation instead.
+    /// Refreshing the same session during drag/deceleration (including a tracking-only touch that
+    /// may interrupt it) transfers cleanup to the refreshed generation. A different session, or a
+    /// capture created re-entrantly by a terminal callback, remains a newer independent owner.
     func transitionCaptureOwnershipDidRefresh(to session: BODragScrollCaptureSession) {
-        guard runtime.transition.isUserDragLifecycleActive,
-              !runtime.transition.isEmittingTerminalDragLifecycleCallback,
-              runtime.transition.captureCleanupOwnership != nil,
+        guard !runtime.transition.isEmittingTerminalDragLifecycleCallback,
+              let ownership = runtime.transition.captureCleanupOwnership,
+              ownership.sessionID == session.id,
               runtime.capture.session === session else { return }
+        let nativeState = nativeScrollState
+        let continuesPhysicalInteraction = runtime.transition.isUserDragLifecycleActive
+            || runtime.transition.isAwaitingDidEndDecelerating
+            || nativeState.isTracking
+            || nativeState.isDecelerating
+            || (runtime.transition.activeTransaction?.reason == .dragRelease
+                && runtime.transition.driver != nil)
+        guard continuesPhysicalInteraction else { return }
         armCaptureCleanupOwnership()
     }
 
     var isPerformingViewTransition: Bool {
         runtime.transition.isViewAnimating
+    }
+
+    var isPerformingSystemScrollTransition: Bool {
+        runtime.transition.driver == .systemAnimation
     }
 
     var lastSystemAnimationEndTimestamp: TimeInterval {
@@ -696,12 +685,23 @@ private extension BODragScrollView {
         return runtime.transition.captureCleanupOwnership
     }
 
-    func finishCapture(ifOwnedBy ownership: BODragScrollCaptureCleanupOwnership?) {
+    func takeCaptureCleanupOwnership(
+        ifUnchanged expected: BODragScrollCaptureCleanupOwnership?
+    ) -> BODragScrollCaptureCleanupOwnership? {
+        guard runtime.transition.captureCleanupOwnership == expected else { return nil }
+        runtime.transition.captureCleanupOwnership = nil
+        return expected
+    }
+
+    func finishCapture(
+        ifOwnedBy ownership: BODragScrollCaptureCleanupOwnership?,
+        disposition: BODragScrollCaptureTeardownDisposition = .forced
+    ) {
         guard let ownership,
               runtime.capture.session?.id == ownership.sessionID,
               runtime.capture.session?.ownershipGeneration
                 == ownership.sessionOwnershipGeneration else { return }
-        endCapture()
+        endCapture(disposition: disposition)
     }
 
     func beginMovementTransaction(
@@ -738,26 +738,9 @@ private extension BODragScrollView {
         replaceActiveMovement(with: transaction, previousOutcome: .interrupted)
 
         if closesNativeDeceleration {
-            // Finishing the interrupted transaction can synchronously enqueue and start a newer
-            // movement. Only this replacement may destructively stop native motion; lifecycle
-            // pairing below still belongs to the cancelled drag and must happen exactly once.
-            if runtime.transition.activeTransaction === transaction {
-                runtime.transition.driver = nil
-                runtime.transition.systemAnimationTransactionID = nil
-                runtime.transition.systemAnimationTargetOffsetY = nil
-                runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
-                runtime.transition.systemAnimationDidReceiveEndCallback = false
-                runtime.transition.systemAnimationStartOffsetY = nil
-                runtime.transition.systemAnimationHasObservedProgress = false
-                runtime.transition.scrollToTopTargetOffsetY = nil
-                runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
-                runtime.transition.scrollToTopDidReceiveEndCallback = false
-                runtime.transition.scrollToTopStartOffsetY = nil
-                runtime.transition.scrollToTopHasObservedProgress = false
-                withInternalMutation {
-                    setContentOffset(contentOffset, animated: false)
-                }
-            }
+            // `replaceActiveMovement` has already atomically detached/stopped the old driver before
+            // emitting any completion. Lifecycle pairing below still belongs to that cancelled
+            // drag and must happen exactly once even if a completion installed a newer movement.
             runtime.transition.isEmittingTerminalDragLifecycleCallback = true
             if let participantToFinish {
                 participantToFinish.delegate?.scrollViewDidEndDecelerating?(
@@ -808,6 +791,7 @@ private extension BODragScrollView {
         // a temporary nonzero frame translation, so deriving a relative delta from current geometry
         // would under/overshoot once scrolling returns the frame to zero.
         var targetOuterOffset = transaction.requestedDisplayHeight - bounds.height
+        var resolvedDisplayHeight = transaction.requestedDisplayHeight
         guard targetOuterOffset.isFinite else {
             transaction.announceResolvedTarget(displayHeight, on: self)
             guard runtime.transition.activeTransaction === transaction else { return displayHeight }
@@ -821,12 +805,13 @@ private extension BODragScrollView {
         if targetOuterOffset < minimumOuterOffset,
            !configuration.bounce.allowsPanelTopBounce {
             targetOuterOffset = minimumOuterOffset
+            resolvedDisplayHeight = effectiveMinimumDisplayHeight
         } else if targetOuterOffset > maximumOuterOffset,
                   !configuration.bounce.allowsPanelBottomBounce {
             targetOuterOffset = maximumOuterOffset
+            resolvedDisplayHeight = maximumConfiguredDisplayHeight
         }
 
-        let resolvedDisplayHeight = bounds.height + targetOuterOffset
         guard resolvedDisplayHeight.isFinite else {
             transaction.announceResolvedTarget(displayHeight, on: self)
             guard runtime.transition.activeTransaction === transaction else { return displayHeight }
@@ -852,6 +837,46 @@ private extension BODragScrollView {
 
         let targetContentOffset = CGPoint(x: contentOffset.x, y: targetOuterOffset)
         guard !CGPointEqualToPoint(contentOffset, targetContentOffset) else {
+            // An on-screen system-scroll request with an exactly equal outer offset receives no
+            // UIKit callback. Match the OC natural-scroll path only in that case; non-animated,
+            // off-window and UIView-animation requests deliberately keep their original behavior.
+            let needsNaturalNoScrollHandling = displayHeight != resolvedDisplayHeight
+                || displayHeightForCurrentGeometry != resolvedDisplayHeight
+            if needsNaturalNoScrollHandling,
+               animated,
+               window != nil,
+               !runtime.capture.isSuspendedForWindowTransition {
+                let styleState = decisionStateToken()
+                let style = resolvedMovementStyle(
+                    requested: options.style,
+                    fromDisplayHeight: displayHeight,
+                    toDisplayHeight: resolvedDisplayHeight,
+                    reason: transaction.reason
+                )
+                guard runtime.transition.activeTransaction === transaction,
+                      decisionStateToken() == styleState else {
+                    if runtime.transition.activeTransaction === transaction {
+                        finishActiveMovement(
+                            transactionID: transaction.id,
+                            outcome: .cancelled,
+                            finalDisplayHeight: displayHeightForCurrentGeometry
+                        )
+                    }
+                    return displayHeight
+                }
+                if !style.isViewAnimation {
+                    withInternalMutation {
+                        correctDisplayHeightResidual(to: resolvedDisplayHeight)
+                    }
+                    guard runtime.transition.activeTransaction === transaction else {
+                        return resolvedDisplayHeight
+                    }
+                    setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
+                    guard runtime.transition.activeTransaction === transaction else {
+                        return resolvedDisplayHeight
+                    }
+                }
+            }
             finishActiveMovement(
                 transactionID: transaction.id,
                 outcome: .completed,
@@ -900,15 +925,10 @@ private extension BODragScrollView {
                 options: options
             )
         case .automatic, .systemScroll:
-            runtime.transition.driver = .systemAnimation
-            runtime.transition.systemAnimationTransactionID = transaction.id
-            runtime.transition.systemAnimationTargetOffsetY = targetContentOffset.y
-            runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
-            runtime.transition.systemAnimationDidReceiveEndCallback = false
-            runtime.transition.systemAnimationStartOffsetY = contentOffset.y
-            runtime.transition.systemAnimationHasObservedProgress = false
-            setContentOffset(targetContentOffset, animated: true)
-            beginMonitoringSystemAnimationSettlement(transactionID: transaction.id)
+            startSystemScrollAnimation(
+                to: targetContentOffset,
+                transaction: transaction
+            )
         }
 
         return resolvedDisplayHeight
@@ -995,18 +1015,7 @@ private extension BODragScrollView {
                 self?.contentOffset = targetContentOffset
             },
             completion: { [weak self] finished in
-                guard let self else { return }
-                guard self.runtime.transition.activeTransaction?.id == transactionID else { return }
-                self.runtime.transition.isViewAnimating = false
-                self.reloadScrollMetrics()
-                guard self.runtime.transition.activeTransaction?.id == transactionID else { return }
-                self.finishCaptureAfterMovementIfNeeded()
-                guard self.runtime.transition.activeTransaction?.id == transactionID else { return }
-                self.finishActiveMovement(
-                    transactionID: transactionID,
-                    outcome: finished ? .completed : .interrupted,
-                    finalDisplayHeight: self.displayHeightForCurrentGeometry
-                )
+                self?.finishViewAnimation(transactionID: transactionID, finished: finished)
             }
         )
 
@@ -1023,6 +1032,41 @@ private extension BODragScrollView {
                 duration: duration,
                 damping: damping,
                 options: animationOptions
+            )
+        }
+    }
+
+    func finishViewAnimation(transactionID: UInt64, finished: Bool) {
+        guard runtime.transition.activeTransaction?.id == transactionID,
+              runtime.transition.driver.isViewAnimation else { return }
+        runtime.transition.isViewAnimating = false
+
+        let nativeState = nativeScrollState
+        let captureOwnership = runtime.transition.captureCleanupOwnership
+        let defersCaptureRelease = captureOwnership != nil
+            && captureSessionMatches(captureOwnership)
+            && (nativeState.isTracking || nativeState.isDecelerating)
+        if !defersCaptureRelease {
+            // Panel-to-panel drag replacement never crosses a participant segment. The
+            // touch-down model is therefore already the authoritative terminal projection;
+            // reloading here would falsely mark this still-owned session as metrics-dirty.
+            finishCaptureAfterMovementIfNeeded(
+                disposition: finished ? .settled : .forced
+            )
+        }
+        guard runtime.transition.activeTransaction?.id == transactionID else { return }
+        finishActiveMovement(
+            transactionID: transactionID,
+            outcome: finished ? .completed : .interrupted,
+            finalDisplayHeight: displayHeightForCurrentGeometry
+        )
+
+        if defersCaptureRelease {
+            // The animation result and real geometry are final now; only the capture lease waits.
+            // A real drag will take over through its ordinary lifecycle, while a tracking-only
+            // touch releases the same-session generation after lift.
+            scheduleCaptureReleaseAfterTrackingOnlyTouch(
+                captureOwnership: captureOwnership
             )
         }
     }
@@ -1060,7 +1104,7 @@ private extension BODragScrollView {
                 return
             }
             if transactionAlreadyCompletedWithoutReplacement {
-                guard self.comparisonPolicy.isJitterEqual(
+                guard self.comparisonPolicy.isValueEqual(
                     self.displayHeightForCurrentGeometry,
                     deferredDisplayHeight
                 ) else { return }
@@ -1085,6 +1129,28 @@ private extension BODragScrollView {
     }
 
     // MARK: System-driven settlement monitoring
+
+    /// Installs all ownership before asking UIKit to animate because `setContentOffset` may emit
+    /// synchronous delegate/KVO callbacks. Both programmatic motion and drag-bounce settlement use
+    /// this single driver path.
+    func startSystemScrollAnimation(
+        to targetContentOffset: CGPoint,
+        transaction: BODragScrollMovementTransaction
+    ) {
+        guard runtime.transition.activeTransaction === transaction,
+              targetContentOffset.x.isFinite,
+              targetContentOffset.y.isFinite,
+              window != nil,
+              !runtime.capture.isSuspendedForWindowTransition else { return }
+        runtime.transition.driver = .systemAnimation
+        runtime.transition.systemAnimationTransactionID = transaction.id
+        runtime.transition.systemAnimationTargetOffsetY = targetContentOffset.y
+        runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
+        runtime.transition.systemAnimationStartOffsetY = contentOffset.y
+        runtime.transition.systemAnimationHasObservedProgress = false
+        setContentOffset(targetContentOffset, animated: true)
+        beginMonitoringSystemAnimationSettlement(transactionID: transaction.id)
+    }
 
     /// UIKit's animation-end callback carries no animation identifier, so a delayed callback from a
     /// cancelled animation cannot itself be trusted to settle the current transaction. Instead,
@@ -1126,19 +1192,46 @@ private extension BODragScrollView {
                 && !self.hasInFlightBoundsAnimation
             let nextStableSampleCount = isStable ? stableSampleCount + 1 : 0
             let reachedTarget = self.runtime.transition.systemAnimationTargetOffsetY.map {
-                self.transitionJitterEqual(self.contentOffset.y, $0)
+                self.transitionValueEqual(self.contentOffset.y, $0)
             } ?? false
             if let startOffsetY = self.runtime.transition.systemAnimationStartOffsetY,
-               !self.transitionJitterEqual(self.contentOffset.y, startOffsetY) {
+               !self.transitionValueEqual(self.contentOffset.y, startOffsetY) {
                 self.runtime.transition.systemAnimationHasObservedProgress = true
             }
-            let maySettleInterrupted = self.runtime.transition.systemAnimationDidReceiveEndCallback
-                || self.runtime.transition.systemAnimationHasObservedProgress
+            // UIKit's end callback has no animation identifier and can belong to a replaced
+            // transaction. Only geometry observed under this transaction may prove that it began
+            // and later stopped short; otherwise retain the 12-frame no-progress fallback.
+            let maySettleInterrupted = self.runtime.transition.systemAnimationHasObservedProgress
+
+            if nextStableSampleCount >= 12,
+               !reachedTarget,
+               !maySettleInterrupted,
+               let targetOffsetY = self.runtime.transition.systemAnimationTargetOffsetY {
+                // UIKit can decline to start a requested scroll animation (for example while its
+                // previous tracking transaction is still unwinding). Never leave the movement and
+                // capture owned forever: after a generous no-progress window, commit the same host
+                // target once without animation. The ordinary didScroll projection still performs
+                // the participant/panel update, so there is no second geometry path.
+                self.setContentOffset(
+                    CGPoint(x: self.contentOffset.x, y: targetOffsetY),
+                    animated: false
+                )
+                guard self.runtime.transition.activeTransaction?.id == transactionID,
+                      self.runtime.transition.driver.isSystemAnimation else { return }
+                self.scheduleSystemAnimationSettlementSample(
+                    transactionID: transactionID,
+                    observedScrollEpoch: self.runtime.scrolling.callbackEpoch,
+                    stableSampleCount: 0
+                )
+                return
+            }
 
             if nextStableSampleCount >= 3,
                reachedTarget || maySettleInterrupted {
                 self.runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
-                self.finishCaptureAfterMovementIfNeeded()
+                self.finishCaptureAfterMovementIfNeeded(
+                    disposition: reachedTarget ? .settled : .forced
+                )
                 guard self.runtime.transition.activeTransaction?.id == transactionID else { return }
                 self.finishActiveMovement(
                     transactionID: transactionID,
@@ -1190,19 +1283,44 @@ private extension BODragScrollView {
                 && !self.hasInFlightBoundsAnimation
             let nextStableSampleCount = isStable ? stableSampleCount + 1 : 0
             let reachedTarget = self.runtime.transition.scrollToTopTargetOffsetY.map {
-                self.transitionJitterEqual(self.contentOffset.y, $0)
+                self.transitionValueEqual(self.contentOffset.y, $0)
             } ?? false
             if let startOffsetY = self.runtime.transition.scrollToTopStartOffsetY,
-               !self.transitionJitterEqual(self.contentOffset.y, startOffsetY) {
+               !self.transitionValueEqual(self.contentOffset.y, startOffsetY) {
                 self.runtime.transition.scrollToTopHasObservedProgress = true
             }
-            let maySettleInterrupted = self.runtime.transition.scrollToTopDidReceiveEndCallback
-                || self.runtime.transition.scrollToTopHasObservedProgress
+            // `scrollViewDidScrollToTop` has no transaction identifier, so its callback cannot be
+            // evidence for this transaction. Only geometry observed while this transaction owns
+            // the driver may prove progress or completion.
+            let maySettleInterrupted = self.runtime.transition.scrollToTopHasObservedProgress
+
+            if nextStableSampleCount >= 12,
+               !reachedTarget,
+               !maySettleInterrupted,
+               let targetOffsetY = self.runtime.transition.scrollToTopTargetOffsetY {
+                // UIKit may decline to start after the delegate authorizes scroll-to-top. Commit
+                // the same resolved target once after a generous no-progress window; ordinary
+                // didScroll projection remains the only geometry path.
+                self.setContentOffset(
+                    CGPoint(x: self.contentOffset.x, y: targetOffsetY),
+                    animated: false
+                )
+                guard self.runtime.transition.activeTransaction?.id == transactionID,
+                      self.runtime.transition.driver.isScrollToTop else { return }
+                self.scheduleScrollToTopSettlementSample(
+                    transactionID: transactionID,
+                    observedScrollEpoch: self.runtime.scrolling.callbackEpoch,
+                    stableSampleCount: 0
+                )
+                return
+            }
 
             if nextStableSampleCount >= 3,
                reachedTarget || maySettleInterrupted {
                 self.runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
-                self.finishCaptureAfterMovementIfNeeded()
+                self.finishCaptureAfterMovementIfNeeded(
+                    disposition: reachedTarget ? .settled : .forced
+                )
                 guard self.runtime.transition.activeTransaction?.id == transactionID else { return }
                 self.finishActiveMovement(
                     transactionID: transactionID,
@@ -1221,6 +1339,27 @@ private extension BODragScrollView {
     }
 
     // MARK: Interruption, replacement, and completion
+
+    /// Atomically releases the transient driver identity and all callback/monitor keys owned by
+    /// it. A native drag can exist without a movement transaction (for example with no detent),
+    /// so driver cleanup must not depend on `activeTransaction` being present.
+    @discardableResult
+    func clearTransitionDriverState() -> BODragScrollTransitionState.Driver? {
+        let driver = runtime.transition.driver
+        runtime.transition.driver = nil
+        runtime.transition.systemAnimationTransactionID = nil
+        runtime.transition.systemAnimationTargetOffsetY = nil
+        runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
+        runtime.transition.systemAnimationStartOffsetY = nil
+        runtime.transition.systemAnimationHasObservedProgress = false
+        runtime.transition.lastSystemAnimationEndTimestamp = 0
+        runtime.transition.scrollToTopTargetOffsetY = nil
+        runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
+        runtime.transition.scrollToTopStartOffsetY = nil
+        runtime.transition.scrollToTopHasObservedProgress = false
+        runtime.transition.isViewAnimating = false
+        return driver
+    }
 
     func interruptRunningMovement(
         outcome: BODragScrollMovementOutcome,
@@ -1260,19 +1399,7 @@ private extension BODragScrollView {
         runtime.transition.activeTransaction = nil
         runtime.transition.pendingLayoutMovement = nil
         runtime.panel.pendingInitialDisplayHeight = nil
-        let driver = runtime.transition.driver
-        runtime.transition.driver = nil
-        runtime.transition.systemAnimationTransactionID = nil
-        runtime.transition.systemAnimationTargetOffsetY = nil
-        runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
-        runtime.transition.systemAnimationDidReceiveEndCallback = false
-        runtime.transition.systemAnimationStartOffsetY = nil
-        runtime.transition.systemAnimationHasObservedProgress = false
-        runtime.transition.scrollToTopTargetOffsetY = nil
-        runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
-        runtime.transition.scrollToTopDidReceiveEndCallback = false
-        runtime.transition.scrollToTopStartOffsetY = nil
-        runtime.transition.scrollToTopHasObservedProgress = false
+        let driver = clearTransitionDriverState()
         runtime.transition.pendingLayoutInterruptions.append(
             BODragScrollPendingLayoutInterruption(
                 transaction: transaction,
@@ -1287,7 +1414,6 @@ private extension BODragScrollView {
             let visibleOffset = layer.presentation()?.bounds.origin ?? contentOffset
             layer.removeAllAnimations()
             panelView?.layer.removeAllAnimations()
-            runtime.transition.isViewAnimating = false
             withInternalMutation {
                 setContentOffset(visibleOffset, animated: false)
             }
@@ -1306,7 +1432,8 @@ private extension BODragScrollView {
         finalDisplayHeight: CGFloat? = nil,
         reconcilesGeometry: Bool = true
     ) {
-        guard let transaction = runtime.transition.activeTransaction else {
+        let transaction = runtime.transition.activeTransaction
+        guard transaction != nil || runtime.transition.driver != nil else {
             runtime.transition.activeTransaction = replacement
             return
         }
@@ -1320,25 +1447,12 @@ private extension BODragScrollView {
             runtime.transition.activeTransaction = replacement
             runtime.transition.pendingLayoutMovement = nil
             runtime.panel.pendingInitialDisplayHeight = nil
-            let driver = runtime.transition.driver
-            runtime.transition.driver = nil
-            runtime.transition.systemAnimationTransactionID = nil
-            runtime.transition.systemAnimationTargetOffsetY = nil
-            runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
-            runtime.transition.systemAnimationDidReceiveEndCallback = false
-            runtime.transition.systemAnimationStartOffsetY = nil
-            runtime.transition.systemAnimationHasObservedProgress = false
-            runtime.transition.scrollToTopTargetOffsetY = nil
-            runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
-            runtime.transition.scrollToTopDidReceiveEndCallback = false
-            runtime.transition.scrollToTopStartOffsetY = nil
-            runtime.transition.scrollToTopHasObservedProgress = false
+            let driver = clearTransitionDriverState()
 
             if driver.isViewAnimation {
                 let visibleOffset = layer.presentation()?.bounds.origin ?? contentOffset
                 layer.removeAllAnimations()
                 panelView?.layer.removeAllAnimations()
-                runtime.transition.isViewAnimating = false
                 setContentOffset(visibleOffset, animated: false)
 
                 let replacementStillOwns: Bool
@@ -1350,14 +1464,17 @@ private extension BODragScrollView {
                 if reconcilesGeometry,
                    replacementStillOwns,
                    runtime.panel.replacementGeneration == panelGeneration {
-                    reloadScrollMetrics()
+                    // A UIView driver is used only for panel-to-panel travel. The existing model
+                    // remains valid at every intermediate host offset; rebuilding it here would
+                    // misclassify this internal animation interruption as a participant-metrics
+                    // change when the interrupting owner is a new drag.
                     setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
                 }
             } else if driver.isSystemDriven {
                 setContentOffset(contentOffset, animated: false)
             }
 
-            transaction.finish(
+            transaction?.finish(
                 outcome: previousOutcome,
                 finalDisplayHeight: finalDisplayHeight ?? displayHeightForCurrentGeometry,
                 on: self
@@ -1375,23 +1492,11 @@ private extension BODragScrollView {
 
         runtime.transition.activeTransaction = nil
         runtime.transition.pendingLayoutMovement = nil
-        runtime.transition.driver = nil
-        runtime.transition.systemAnimationTransactionID = nil
-        runtime.transition.systemAnimationTargetOffsetY = nil
-        runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
-        runtime.transition.systemAnimationDidReceiveEndCallback = false
-        runtime.transition.systemAnimationStartOffsetY = nil
-        runtime.transition.systemAnimationHasObservedProgress = false
-        runtime.transition.scrollToTopTargetOffsetY = nil
-        runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
-        runtime.transition.scrollToTopDidReceiveEndCallback = false
-        runtime.transition.scrollToTopStartOffsetY = nil
-        runtime.transition.scrollToTopHasObservedProgress = false
-        runtime.transition.isViewAnimating = false
+        clearTransitionDriverState()
         let verifiedOutcome: BODragScrollMovementOutcome
         if outcome == .completed,
            let resolvedDisplayHeight = transaction.resolvedDisplayHeight,
-           !comparisonPolicy.isJitterEqual(resolvedDisplayHeight, finalDisplayHeight) {
+           !comparisonPolicy.isValueEqual(resolvedDisplayHeight, finalDisplayHeight) {
             // Axis geometry may be rebuilt while UIKit is animating/decelerating. Never report a
             // completed intention when the terminal visible height no longer matches its target.
             verifiedOutcome = .interrupted
@@ -1405,8 +1510,13 @@ private extension BODragScrollView {
         )
     }
 
-    func finishCaptureAfterMovementIfNeeded() {
-        finishCapture(ifOwnedBy: takeCaptureCleanupOwnership())
+    func finishCaptureAfterMovementIfNeeded(
+        disposition: BODragScrollCaptureTeardownDisposition
+    ) {
+        finishCapture(
+            ifOwnedBy: takeCaptureCleanupOwnership(),
+            disposition: disposition
+        )
     }
 
     func displayHeightForOuterOffset(_ outerOffset: CGFloat) -> CGFloat {
@@ -1440,11 +1550,9 @@ private extension BODragScrollView {
             )
         }
 
-        reloadScrollMetrics()
-        guard runtime.transition.nextTransactionID == resolutionEpoch,
-              runtime.transition.activeTransaction == nil else {
-            return supersededTarget()
-        }
+        // Release targeting is a read-only decision over the model captured at touch-down. A
+        // rebuild here would derive a new model from live bounce/deceleration offsets and mutate
+        // the geometry while UIKit is merely asking for a target.
         let resolutionState = decisionStateToken()
 
         guard let model = releaseTargetModel(), !model.segments.isEmpty else {
@@ -1501,6 +1609,9 @@ private extension BODragScrollView {
               decisionStateToken() == resolutionState else {
             return supersededTarget()
         }
+        // This is the final target owned by the component plus the primary participant delegate.
+        // Only an exact later difference means the external behavior provider replaced that intent.
+        let componentTargetOuterOffset = target.y
         let providerFallback = finiteTargetContentOffset(
             target,
             ultimateFallback: contentOffset
@@ -1546,9 +1657,22 @@ private extension BODragScrollView {
             return supersededTarget()
         }
 
+        let finalDisplayHeight: CGFloat
+        if target.y == componentTargetOuterOffset,
+           let segment = decision.selectedAnchor?.segment,
+           target.y == segment.outerStart || target.y == segment.outerEnd {
+            // A component-selected attach endpoint has a model-authoritative height. Do not rebuild
+            // that value by subtracting and adding outer-axis distances.
+            finalDisplayHeight = segment.displayHeight
+        } else {
+            // A behavior-provider override remains authoritative and is projected from its real
+            // target offset, even if it happens to be numerically near an attach endpoint.
+            finalDisplayHeight = finalProjection.displayHeight
+        }
+
         return ResolvedReleaseTarget(
             contentOffset: target,
-            displayHeight: finalProjection.displayHeight,
+            displayHeight: finalDisplayHeight,
             decision: decision
         )
     }
@@ -1671,7 +1795,7 @@ private extension BODragScrollView {
         guard delegateTarget.y.isFinite else {
             return currentTargetOuterOffset
         }
-        guard !model.comparison.isJitterEqual(delegateTarget.y, originalInnerTarget) else {
+        guard delegateTarget.y != originalInnerTarget else {
             return currentTargetOuterOffset
         }
 
@@ -1712,6 +1836,192 @@ private extension BODragScrollView {
         }
     }
 
+    /// Close only the begin notifications that were actually sent before a synchronous callback
+    /// invalidated this touch's host/panel hierarchy. This differs from window-removal cleanup:
+    /// the host begin may not have been emitted yet even though the participant begin was.
+    func finishInvalidatedDragBegin() {
+        let participant = runtime.transition.forwardedDragLifecycleToParticipant
+            ? runtime.transition.forwardedParticipant
+            : nil
+        let shouldForwardHostDragEnd = runtime.transition.forwardedDragBeginToEventDelegate
+        runtime.transition.forwardedDragLifecycleToParticipant = false
+        runtime.transition.forwardedParticipant = nil
+        runtime.transition.forwardedDragBeginToEventDelegate = false
+        runtime.transition.isAwaitingDidEndDecelerating = false
+        runtime.transition.isEmittingTerminalDragLifecycleCallback = true
+        if let participant {
+            participant.delegate?.scrollViewDidEndDragging?(
+                participant,
+                willDecelerate: false
+            )
+        }
+        if shouldForwardHostDragEnd {
+            eventDelegate?.dragScrollViewDidEndDragging(self, willDecelerate: false)
+        }
+        runtime.transition.isEmittingTerminalDragLifecycleCallback = false
+        let ownership = takeCaptureCleanupOwnership()
+        finishCapture(ifOwnedBy: ownership, disposition: .forced)
+        finishDeferredControlInteraction()
+        finishUserDragLifecycleAndRunDeferredMovements()
+    }
+
+    func captureSessionMatches(
+        _ ownership: BODragScrollCaptureCleanupOwnership?
+    ) -> Bool {
+        let session = runtime.capture.session
+        guard let ownership else { return session == nil }
+        return session?.id == ownership.sessionID
+            && session?.ownershipGeneration == ownership.sessionOwnershipGeneration
+    }
+
+    /// Follow an ownership transfer only while it still names the same capture session and the
+    /// session itself confirms the latest generation. Refreshes performed by the active physical
+    /// touch update `captureCleanupOwnership`; a re-entrant terminal callback deliberately does
+    /// not, so its independent capture cannot be adopted by an older async cleanup task.
+    func captureCleanupOwnershipContinuingSameSession(
+        from expected: BODragScrollCaptureCleanupOwnership?
+    ) -> (matches: Bool, ownership: BODragScrollCaptureCleanupOwnership?) {
+        let current = runtime.transition.captureCleanupOwnership
+        if current == expected, captureSessionMatches(current) {
+            return (true, current)
+        }
+        guard let expected,
+              let expectedSessionID = expected.sessionID,
+              let current,
+              current.sessionID == expectedSessionID,
+              captureSessionMatches(current) else {
+            return (false, nil)
+        }
+        return (true, current)
+    }
+
+    /// Finish a drag release only after UIKit has relinquished tracking/deceleration. If the host is
+    /// still outside its legal axis, its UIScrollView owns the return animation and the ordinary
+    /// projection path moves the visible bounce owner each frame. A tracking-only touch may instead
+    /// become a real drag; transaction and capture generations make that newer owner cancel this task.
+    func scheduleDragReleaseSettlement(
+        transactionID: UInt64,
+        expectedDriver: BODragScrollTransitionState.Driver?,
+        captureOwnership: BODragScrollCaptureCleanupOwnership?
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  let transaction = self.runtime.transition.activeTransaction,
+                  transaction.id == transactionID,
+                  transaction.reason == .dragRelease,
+                  self.runtime.transition.driver == expectedDriver else { return }
+
+            let continuingOwnership = self.captureCleanupOwnershipContinuingSameSession(
+                from: captureOwnership
+            )
+            guard continuingOwnership.matches else {
+                // A terminal callback installed/refreshed another capture without starting a new
+                // movement. It is a newer interaction owner, so only close the old transaction.
+                _ = self.takeCaptureCleanupOwnership(ifUnchanged: captureOwnership)
+                self.finishActiveMovement(
+                    transactionID: transactionID,
+                    outcome: .interrupted,
+                    finalDisplayHeight: self.displayHeightForCurrentGeometry
+                )
+                return
+            }
+            let currentCaptureOwnership = continuingOwnership.ownership
+
+            guard self.window != nil,
+                  !self.runtime.capture.isSuspendedForWindowTransition else {
+                let ownership = self.takeCaptureCleanupOwnership(
+                    ifUnchanged: currentCaptureOwnership
+                )
+                self.finishCapture(ifOwnedBy: ownership, disposition: .forced)
+                guard self.runtime.transition.activeTransaction?.id == transactionID else { return }
+                self.finishActiveMovement(
+                    transactionID: transactionID,
+                    outcome: .interrupted,
+                    finalDisplayHeight: self.displayHeightForCurrentGeometry
+                )
+                return
+            }
+
+            let nativeState = self.nativeScrollState
+            if nativeState.isTracking || nativeState.isDecelerating {
+                // A real drag will synchronously interrupt this transaction in willBeginDragging.
+                // A tap can temporarily make the host tracking without ever beginning a drag, and
+                // native bounce deceleration can outlive didEndDragging(false). Recheck after the
+                // current native interaction instead of abandoning this transaction and capture.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { [weak self] in
+                    self?.scheduleDragReleaseSettlement(
+                        transactionID: transactionID,
+                        expectedDriver: expectedDriver,
+                        captureOwnership: currentCaptureOwnership
+                    )
+                }
+                return
+            }
+
+            guard let overscroll = self.hostOverscrollState() else {
+                let ownership = self.takeCaptureCleanupOwnership(
+                    ifUnchanged: currentCaptureOwnership
+                )
+                self.finishCapture(ifOwnedBy: ownership, disposition: .settled)
+                guard self.runtime.transition.activeTransaction?.id == transactionID else { return }
+                self.finishActiveMovement(
+                    transactionID: transactionID,
+                    outcome: .completed,
+                    finalDisplayHeight: self.displayHeightForCurrentGeometry
+                )
+                return
+            }
+
+            self.startSystemScrollAnimation(
+                to: CGPoint(x: self.contentOffset.x, y: overscroll.boundaryOffset),
+                transaction: transaction
+            )
+        }
+    }
+
+    /// UIKit can omit `willEndDragging`, leaving a valid native-deceleration lifecycle without a
+    /// movement transaction. If its terminal callback arrives during a tracking-only touch, retain
+    /// that touch's refreshed capture until it either becomes a real drag or lifts. No extra state
+    /// machine is needed: the existing capture generation and user-drag flag identify the owner.
+    func scheduleCaptureReleaseAfterTrackingOnlyTouch(
+        captureOwnership: BODragScrollCaptureCleanupOwnership?
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { [weak self] in
+            guard let self,
+                  self.runtime.transition.activeTransaction == nil,
+                  self.runtime.transition.driver == nil else { return }
+            let continuingOwnership = self.captureCleanupOwnershipContinuingSameSession(
+                from: captureOwnership
+            )
+            guard continuingOwnership.matches else {
+                // Drop only the stale token. A different session, or a same-session generation
+                // installed re-entrantly by a terminal callback, remains independently captured.
+                _ = self.takeCaptureCleanupOwnership(ifUnchanged: captureOwnership)
+                return
+            }
+            let currentCaptureOwnership = continuingOwnership.ownership
+
+            // A real drag now owns this capture and its ordinary did-end path will release it.
+            guard !self.runtime.transition.isUserDragLifecycleActive else { return }
+
+            let nativeState = self.nativeScrollState
+            if nativeState.isTracking || nativeState.isDecelerating {
+                self.scheduleCaptureReleaseAfterTrackingOnlyTouch(
+                    captureOwnership: currentCaptureOwnership
+                )
+                return
+            }
+
+            let ownership = self.takeCaptureCleanupOwnership(
+                ifUnchanged: currentCaptureOwnership
+            )
+            let disposition: BODragScrollCaptureTeardownDisposition =
+                self.hostOverscrollState() == nil ? .settled : .forced
+            self.finishCapture(ifOwnedBy: ownership, disposition: disposition)
+            self.finishDeferredControlInteraction()
+        }
+    }
+
 }
 
 // MARK: - UIScrollViewDelegate settlement lifecycle
@@ -1723,6 +2033,26 @@ extension BODragScrollView: UIScrollViewDelegate {
         // of the previous deceleration. Callback-originated movements therefore wait until this
         // tracking lifecycle ends instead of tearing down the capture needed by the new drag.
         runtime.transition.isUserDragLifecycleActive = true
+        runtime.transition.forwardedDragBeginToEventDelegate = false
+        let windowAtEntry = window
+        let panelAtEntry = panelView
+        let panelGenerationAtEntry = runtime.panel.replacementGeneration
+        var captureSessionAtEntry = runtime.capture.session
+        func dragEntryIsStillValid() -> Bool {
+            let captureIsStillValid: Bool
+            if let captureSessionAtEntry {
+                captureIsStillValid = runtime.capture.session === captureSessionAtEntry
+                    && captureSessionIsCurrentAndHierarchyValid(captureSessionAtEntry)
+            } else {
+                captureIsStillValid = runtime.capture.session == nil
+            }
+            return runtime.transition.isUserDragLifecycleActive
+                && window === windowAtEntry
+                && panelView === panelAtEntry
+                && runtime.panel.replacementGeneration == panelGenerationAtEntry
+                && !runtime.capture.isSuspendedForWindowTransition
+                && captureIsStillValid
+        }
         if runtime.transition.isAwaitingDidEndDecelerating {
             // A new touch can cancel native deceleration before UIKit delivers its terminal
             // callback. Pair the previously forwarded lifecycle now, then transfer capture
@@ -1740,11 +2070,37 @@ extension BODragScrollView: UIScrollViewDelegate {
             eventDelegate?.dragScrollViewDidEndDecelerating(self)
             finishDeferredControlInteraction()
             runtime.transition.isEmittingTerminalDragLifecycleCallback = false
+
+            // A terminal callback may remove the host or replace the panel that received this
+            // touch. In either case this begin belongs to invalidated geometry and must not be
+            // resurrected against the new hierarchy. Later callbacks from this cancelled UIKit
+            // drag are ignored by the lifecycle guards below.
+            guard dragEntryIsStillValid() else {
+                finishInvalidatedDragBegin()
+                return
+            }
         }
         cancelPendingTouchCompletionSettlement()
         interruptRunningMovement(outcome: .interrupted)
-        runtime.transition.dragStartDisplayHeight = displayHeight
-        runtime.transition.dragDisplayHeightDidChange = false
+        // Completing the interrupted movement is an external callback boundary. It may remove the
+        // host or replace the panel just like the synthetic deceleration callback above; never arm
+        // the invalid touch against that new hierarchy or forward a mismatched begin lifecycle.
+        guard dragEntryIsStillValid() else {
+            finishInvalidatedDragBegin()
+            return
+        }
+        if let touchedView = runtime.capture.deferredTouchViewForFreshCapture {
+            // Touch-down must not replace the axis while the previous deceleration still owns its
+            // physics. Now that a real drag has interrupted that driver, build one fresh model from
+            // current metrics before forwarding the new begin lifecycle.
+            runtime.capture.deferredTouchViewForFreshCapture = nil
+            _ = beginCapture(from: touchedView, requiresFreshSession: true)
+            captureSessionAtEntry = runtime.capture.session
+            guard dragEntryIsStillValid() else {
+                finishInvalidatedDragBegin()
+                return
+            }
+        }
         armCaptureCleanupOwnership()
         let forwardedParticipant = hasParticipantSegments ? primaryParticipantScrollView : nil
         runtime.transition.forwardedParticipant = forwardedParticipant
@@ -1752,9 +2108,23 @@ extension BODragScrollView: UIScrollViewDelegate {
 
         if let participant = forwardedParticipant {
             participant.delegate?.scrollViewWillBeginDragging?(participant)
+            // Participant delegates are also external callback boundaries. If this callback
+            // invalidates the hierarchy, pair the participant begin locally; the host-level begin
+            // has not been sent yet and therefore must not receive a synthetic end.
+            guard dragEntryIsStillValid() else {
+                finishInvalidatedDragBegin()
+                return
+            }
         }
+        runtime.transition.forwardedDragBeginToEventDelegate = true
         eventDelegate?.dragScrollViewWillBeginDragging(self)
-        reloadScrollMetrics()
+        guard dragEntryIsStillValid() else {
+            finishInvalidatedDragBegin()
+            return
+        }
+        // `beginCapture(from:)` has already installed the model for a fresh touch. When this touch
+        // interrupts deceleration, retaining that model preserves the current projected overscroll
+        // and lets the new pan continue from exactly what is visible on screen.
     }
 
     public func scrollViewWillEndDragging(
@@ -1762,6 +2132,10 @@ extension BODragScrollView: UIScrollViewDelegate {
         withVelocity velocity: CGPoint,
         targetContentOffset: UnsafeMutablePointer<CGPoint>
     ) {
+        guard runtime.transition.isUserDragLifecycleActive else {
+            targetContentOffset.pointee = contentOffset
+            return
+        }
         let transactionEpoch = runtime.transition.nextTransactionID
         let resolved = resolveReleaseTarget(
             proposedContentOffset: targetContentOffset.pointee,
@@ -1773,8 +2147,6 @@ extension BODragScrollView: UIScrollViewDelegate {
         // movement. Do not emit stale release events for the superseded drag.
         guard runtime.transition.nextTransactionID == transactionEpoch,
               runtime.transition.activeTransaction == nil else {
-            runtime.transition.dragStartDisplayHeight = nil
-            runtime.transition.dragDisplayHeightDidChange = false
             targetContentOffset.pointee = contentOffset
             return
         }
@@ -1791,25 +2163,16 @@ extension BODragScrollView: UIScrollViewDelegate {
         guard runtime.transition.nextTransactionID == transactionEpoch,
               runtime.transition.activeTransaction == nil,
               decisionStateToken() == resolvedState else {
-            runtime.transition.dragStartDisplayHeight = nil
-            runtime.transition.dragDisplayHeightDidChange = false
             targetContentOffset.pointee = contentOffset
             return
         }
 
-        let willDecelerate = !transitionJitterEqual(
-            resolved.contentOffset.y,
-            contentOffset.y
-        )
-        let startDisplayHeight = runtime.transition.dragStartDisplayHeight ?? displayHeight
-        let shouldEmitMovement = runtime.transition.dragDisplayHeightDidChange
-            || !transitionJitterEqual(resolved.displayHeight, startDisplayHeight)
+        // These are UIKit's concrete current and target offsets. Any exact difference represents a
+        // real target movement; no numeric tolerance may suppress its lifecycle or callback path.
+        let willDecelerate = resolved.contentOffset.y != contentOffset.y
 
-        runtime.transition.dragStartDisplayHeight = nil
-        runtime.transition.dragDisplayHeightDidChange = false
-
-        guard shouldEmitMovement else { return }
-
+        // A release target is an event/intent, not a value-changed notification. Emit a movement
+        // transaction for every valid will-end-dragging callback, including a same-height target.
         let transaction = beginMovementTransaction(
             requestedDisplayHeight: resolved.displayHeight,
             reason: .dragRelease,
@@ -1916,29 +2279,40 @@ extension BODragScrollView: UIScrollViewDelegate {
         _ scrollView: UIScrollView,
         willDecelerate decelerate: Bool
     ) {
+        guard runtime.transition.isUserDragLifecycleActive else { return }
         // Deferral protects only the synchronous tracking lifecycle. Once did-end returns, a
         // programmatic movement is authoritative and may interrupt native deceleration immediately.
         defer {
             runtime.transition.isEmittingTerminalDragLifecycleCallback = false
             finishUserDragLifecycleAndRunDeferredMovements()
         }
-        if decelerate, runtime.transition.driver == .dragWithoutDeceleration {
+        if decelerate, !runtime.transition.driver.isAnimation {
             // UIKit's actual lifecycle result is authoritative when its prediction differs from
-            // our jitter-band estimate in willEndDragging.
+            // will-end, or when UIKit omitted will-end for a cancelled/synthetic drag. A movement
+            // already replaced by a component-owned animation remains under that driver's owner.
             runtime.transition.driver = .dragDeceleration
         }
         let finishingTransactionID = runtime.transition.activeTransaction?.id
         let finishingDriver = runtime.transition.driver
-        let finishesWithoutDeceleration = !decelerate && !finishingDriver.isAnimation
+        // `decelerate` describes UIKit's callback, but will-end may already have replaced that
+        // native motion with a component-owned view animation. Only the native driver waits for
+        // `didEndDecelerating`; every other driver keeps its own completion ownership.
+        let awaitsNativeDeceleration = decelerate && finishingDriver == .dragDeceleration
+        let finishesWithoutDeceleration = !awaitsNativeDeceleration && !finishingDriver.isAnimation
         let captureOwnership = finishesWithoutDeceleration
-            ? takeCaptureCleanupOwnership()
+            ? runtime.transition.captureCleanupOwnership
             : nil
+        let needsHostOverscrollReturn = finishesWithoutDeceleration
+            && hostOverscrollState() != nil
+            && finishingTransactionID != nil
+            && runtime.transition.activeTransaction?.reason == .dragRelease
 
         let participant = runtime.transition.forwardedDragLifecycleToParticipant
             ? runtime.transition.forwardedParticipant
             : nil
-        runtime.transition.isAwaitingDidEndDecelerating = decelerate
-        if !decelerate {
+        runtime.transition.forwardedDragBeginToEventDelegate = false
+        runtime.transition.isAwaitingDidEndDecelerating = awaitsNativeDeceleration
+        if !awaitsNativeDeceleration {
             runtime.transition.forwardedDragLifecycleToParticipant = false
             runtime.transition.forwardedParticipant = nil
         }
@@ -1947,21 +2321,38 @@ extension BODragScrollView: UIScrollViewDelegate {
         if let participant {
             participant.delegate?.scrollViewDidEndDragging?(
                 participant,
-                willDecelerate: decelerate
+                willDecelerate: awaitsNativeDeceleration
             )
         }
-        eventDelegate?.dragScrollViewDidEndDragging(self, willDecelerate: decelerate)
+        eventDelegate?.dragScrollViewDidEndDragging(
+            self,
+            willDecelerate: awaitsNativeDeceleration
+        )
         finishDeferredControlInteraction()
-
-        // End only the session captured by this drag. A callback above may have installed a newer
-        // capture, which must survive the older UIKit lifecycle.
-        finishCapture(ifOwnedBy: captureOwnership)
 
         guard runtime.transition.activeTransaction?.id == finishingTransactionID,
               runtime.transition.driver == finishingDriver else {
             return
         }
         if finishesWithoutDeceleration {
+            if needsHostOverscrollReturn, let transactionID = finishingTransactionID {
+                scheduleDragReleaseSettlement(
+                    transactionID: transactionID,
+                    expectedDriver: finishingDriver,
+                    captureOwnership: captureOwnership
+                )
+                return
+            }
+
+            // End only the generation captured by this drag. A terminal callback may have installed
+            // a newer capture, which must survive this older UIKit lifecycle.
+            let ownership = takeCaptureCleanupOwnership(ifUnchanged: captureOwnership)
+            let disposition: BODragScrollCaptureTeardownDisposition = hostOverscrollState() == nil
+                ? .settled
+                : .forced
+            finishCapture(ifOwnedBy: ownership, disposition: disposition)
+            guard runtime.transition.activeTransaction?.id == finishingTransactionID,
+                  runtime.transition.driver == finishingDriver else { return }
             if let transactionID = finishingTransactionID {
                 finishActiveMovement(
                     transactionID: transactionID,
@@ -1975,7 +2366,6 @@ extension BODragScrollView: UIScrollViewDelegate {
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         let nativeState = nativeScrollState
         guard runtime.transition.isAwaitingDidEndDecelerating,
-              !nativeState.isTracking,
               !nativeState.isDecelerating else { return }
         defer {
             runtime.transition.isEmittingTerminalDragLifecycleCallback = false
@@ -1983,7 +2373,7 @@ extension BODragScrollView: UIScrollViewDelegate {
         }
         let finishingTransactionID = runtime.transition.activeTransaction?.id
         let finishingDriver = runtime.transition.driver
-        let captureOwnership = takeCaptureCleanupOwnership()
+        let captureOwnership = runtime.transition.captureCleanupOwnership
         runtime.transition.isAwaitingDidEndDecelerating = false
 
         let participant = runtime.transition.forwardedDragLifecycleToParticipant
@@ -1998,12 +2388,46 @@ extension BODragScrollView: UIScrollViewDelegate {
         }
         eventDelegate?.dragScrollViewDidEndDecelerating(self)
 
-        finishCapture(ifOwnedBy: captureOwnership)
-
         guard runtime.transition.activeTransaction?.id == finishingTransactionID,
               runtime.transition.driver == finishingDriver else {
             return
         }
+        // UIKit may deliver this old deceleration's sole terminal callback while a new finger is
+        // merely tracking, before that touch either becomes a drag or lifts. Pair callbacks now,
+        // but keep the transaction/capture until tracking ends so a real drag can take them over.
+        let mustWaitForTrackingToEnd = nativeScrollState.isTracking
+        if (mustWaitForTrackingToEnd || hostOverscrollState() != nil),
+           runtime.transition.activeTransaction?.reason == .dragRelease,
+           let transactionID = finishingTransactionID {
+            scheduleDragReleaseSettlement(
+                transactionID: transactionID,
+                expectedDriver: finishingDriver,
+                captureOwnership: captureOwnership
+            )
+            return
+        }
+
+        if finishingTransactionID == nil {
+            // A native drag can legitimately have no movement transaction when UIKit omitted
+            // will-end. Its terminal callback must still release the driver identity; otherwise
+            // all future metrics/configuration updates look perpetually active.
+            clearTransitionDriverState()
+            if mustWaitForTrackingToEnd {
+                scheduleCaptureReleaseAfterTrackingOnlyTouch(
+                    captureOwnership: captureOwnership
+                )
+                return
+            }
+        }
+
+        let ownership = takeCaptureCleanupOwnership(ifUnchanged: captureOwnership)
+        let disposition: BODragScrollCaptureTeardownDisposition = hostOverscrollState() == nil
+            ? .settled
+            : .forced
+        finishCapture(ifOwnedBy: ownership, disposition: disposition)
+        let expectedTerminalDriver = finishingTransactionID == nil ? nil : finishingDriver
+        guard runtime.transition.activeTransaction?.id == finishingTransactionID,
+              runtime.transition.driver == expectedTerminalDriver else { return }
         if finishingDriver == .dragDeceleration,
            let transactionID = finishingTransactionID {
             finishActiveMovement(
@@ -2015,14 +2439,16 @@ extension BODragScrollView: UIScrollViewDelegate {
     }
 
     public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
-        runtime.transition.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
-
         if runtime.transition.driver.isSystemAnimation,
            let transactionID = runtime.transition.activeTransaction?.id,
            runtime.transition.systemAnimationTransactionID == transactionID {
-            runtime.transition.systemAnimationDidReceiveEndCallback = true
+            // The callback has no animation identifier. Arm touch-completion only when the current
+            // driver and transaction still match; an old callback must not affect an unrelated tap.
+            runtime.transition.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
             beginMonitoringSystemAnimationSettlement(transactionID: transactionID)
         }
+        // Preserve the system delegate semantics even when this is a stale callback; only the
+        // component's internal ownership-sensitive side effect is gated above.
         eventDelegate?.dragScrollViewDidEndScrollingAnimation(self)
     }
 
@@ -2106,7 +2532,7 @@ extension BODragScrollView: UIScrollViewDelegate {
         ),
            !hasInFlightBoundsAnimation {
             armCaptureCleanupOwnership()
-            finishCaptureAfterMovementIfNeeded()
+            finishCaptureAfterMovementIfNeeded(disposition: .settled)
             guard runtime.transition.activeTransaction === transaction else { return false }
             finishActiveMovement(
                 transactionID: transaction.id,
@@ -2118,7 +2544,6 @@ extension BODragScrollView: UIScrollViewDelegate {
         runtime.transition.driver = .scrollToTop
         runtime.transition.scrollToTopTargetOffsetY = targetOffsetY
         runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
-        runtime.transition.scrollToTopDidReceiveEndCallback = false
         runtime.transition.scrollToTopStartOffsetY = contentOffset.y
         runtime.transition.scrollToTopHasObservedProgress = false
         armCaptureCleanupOwnership()
@@ -2127,29 +2552,27 @@ extension BODragScrollView: UIScrollViewDelegate {
     }
 
     public func scrollViewDidScrollToTop(_ scrollView: UIScrollView) {
-        if runtime.transition.driver.isScrollToTop,
-           let transactionID = runtime.transition.activeTransaction?.id {
-            runtime.transition.scrollToTopDidReceiveEndCallback = true
-            beginMonitoringScrollToTopSettlement(transactionID: transactionID)
-        }
+        // UIKit supplies no identifier that can associate this callback with the current
+        // scroll-to-top request. Settlement monitoring already started with the transaction and
+        // uses only its observed target/progress, so a stale callback has no internal side effect.
         eventDelegate?.dragScrollViewDidScrollToTop(self)
     }
 }
 
 @MainActor
 private extension BODragScrollView {
-    func transitionJitterEqual(_ lhs: CGFloat, _ rhs: CGFloat) -> Bool {
+    func transitionValueEqual(_ lhs: CGFloat, _ rhs: CGFloat) -> Bool {
         if let comparison = activeScrollModel?.comparison {
-            return comparison.isJitterEqual(lhs, rhs)
+            return comparison.isValueEqual(lhs, rhs)
         }
-        return comparisonPolicy.isJitterEqual(lhs, rhs)
+        return comparisonPolicy.isValueEqual(lhs, rhs)
     }
 
     var hasInFlightBoundsAnimation: Bool {
         guard let presentationOffsetY = layer.presentation()?.bounds.origin.y else {
             return false
         }
-        return !transitionJitterEqual(presentationOffsetY, layer.bounds.origin.y)
+        return !transitionValueEqual(presentationOffsetY, layer.bounds.origin.y)
     }
 
     func movementCrossesParticipantSegment(

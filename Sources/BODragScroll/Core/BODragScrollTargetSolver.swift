@@ -388,9 +388,12 @@ enum TargetSolver {
 
             // OC 32: return from an outer bounce. The bottom source branch
             // classifies any current offset beyond max, while the top branch
-            // additionally checks that the target is exactly the normal min.
+            // uses one physical pixel only to recognize the normal-min scene.
             if input.currentOuterOffset < input.minimumOuterOffset,
-               model.comparison.isJitterEqual(targetOuterOffset, input.minimumOuterOffset) {
+               model.comparison.isWithinBoundaryBand(
+                   targetOuterOffset,
+                   input.minimumOuterOffset
+               ) {
                 scrollType = .bounceReturn
             } else if input.currentOuterOffset > input.maximumOuterOffset {
                 scrollType = .bounceReturn

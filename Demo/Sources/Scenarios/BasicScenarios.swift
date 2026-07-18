@@ -1,6 +1,6 @@
 import UIKit
 
-final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDelegate {
+final class FreePanelViewController: DemoScenarioViewController {
     private enum ContentAmount: Int, Equatable {
         case smaller
         case equal
@@ -27,6 +27,7 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
     private let contentMetricsLabel = UILabel()
     private let contentDocumentView = UIView()
     private var contentHeightConstraint: NSLayoutConstraint?
+    private var contentOffsetObservation: NSKeyValueObservation?
     private var selectedContentAmount: ContentAmount = .larger
     private var appliedContentGeometry: ContentGeometry?
     private var shouldResetContentOffset = true
@@ -69,6 +70,8 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
         [("freePanelContentScroll", contentScrollView)]
     }
 
+    override var allowsPostInitializationHeightCorrection: Bool { false }
+
     override func configureContent(in contentView: UIView) {
         let controlSurface = UIView()
         controlSurface.backgroundColor = DemoPalette.elevatedSurface
@@ -80,16 +83,6 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
         amountTitle.font = .systemFont(ofSize: 12, weight: .semibold)
         amountTitle.textColor = DemoPalette.secondaryInk
         amountTitle.translatesAutoresizingMaskIntoConstraints = false
-
-        let collapseButton = UIButton(type: .system)
-        collapseButton.setTitle("收起", for: .normal)
-        collapseButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
-        collapseButton.setTitleColor(DemoPalette.orange, for: .normal)
-        collapseButton.backgroundColor = DemoPalette.orange.withAlphaComponent(0.12)
-        collapseButton.layer.cornerRadius = 10
-        collapseButton.accessibilityIdentifier = "free.collapse"
-        collapseButton.addTarget(self, action: #selector(collapsePanel), for: .touchUpInside)
-        collapseButton.translatesAutoresizingMaskIntoConstraints = false
 
         contentAmountControl.selectedSegmentIndex = selectedContentAmount.rawValue
         contentAmountControl.accessibilityIdentifier = "free.contentAmount"
@@ -106,7 +99,6 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
         contentMetricsLabel.translatesAutoresizingMaskIntoConstraints = false
 
         controlSurface.addSubview(amountTitle)
-        controlSurface.addSubview(collapseButton)
         controlSurface.addSubview(contentAmountControl)
         controlSurface.addSubview(contentMetricsLabel)
 
@@ -157,7 +149,6 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
 
         contentScrollView.alwaysBounceVertical = false
         contentScrollView.scrollsToTop = false
-        contentScrollView.delegate = self
         contentScrollView.contentInsetAdjustmentBehavior = .never
         contentScrollView.contentInset = UIEdgeInsets(top: 12, left: 0, bottom: 16, right: 0)
         contentScrollView.verticalScrollIndicatorInsets = contentScrollView.contentInset
@@ -178,12 +169,7 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
 
             amountTitle.leadingAnchor.constraint(equalTo: controlSurface.leadingAnchor, constant: 12),
             amountTitle.topAnchor.constraint(equalTo: controlSurface.topAnchor, constant: 9),
-            amountTitle.trailingAnchor.constraint(lessThanOrEqualTo: collapseButton.leadingAnchor, constant: -8),
-
-            collapseButton.trailingAnchor.constraint(equalTo: controlSurface.trailingAnchor, constant: -10),
-            collapseButton.centerYAnchor.constraint(equalTo: amountTitle.centerYAnchor),
-            collapseButton.widthAnchor.constraint(equalToConstant: 52),
-            collapseButton.heightAnchor.constraint(equalToConstant: 26),
+            amountTitle.trailingAnchor.constraint(equalTo: controlSurface.trailingAnchor, constant: -12),
 
             contentAmountControl.leadingAnchor.constraint(equalTo: controlSurface.leadingAnchor, constant: 10),
             contentAmountControl.trailingAnchor.constraint(equalTo: controlSurface.trailingAnchor, constant: -10),
@@ -220,6 +206,13 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
             stack.trailingAnchor.constraint(equalTo: contentDocumentView.trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: contentDocumentView.topAnchor, constant: 12)
         ])
+
+        // Diagnostics remain observational: do not install the page as the scroll view's delegate.
+        // Updating only accessibility metadata also avoids creating layout work while dragging.
+        contentOffsetObservation = contentScrollView.observe(\.contentOffset, options: [.new]) {
+            [weak self] _, _ in
+            self?.updateContentMetrics(updatesVisibleLabel: false)
+        }
     }
 
     @objc private func contentAmountChanged(_ sender: UISegmentedControl) {
@@ -294,10 +287,9 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
             }
         }
         updateContentMetrics()
-        dragEngine.reloadScrollMetrics()
     }
 
-    private func updateContentMetrics() {
+    private func updateContentMetrics(updatesVisibleLabel: Bool = true) {
         let boundsHeight = contentScrollView.bounds.height
         guard boundsHeight > 0 else { return }
         let inset = contentScrollView.adjustedContentInset
@@ -321,15 +313,17 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
             symbol = "="
         }
 
-        contentMetricsLabel.text = String(
-            format: "有效 %.1f %@ 可视 %.1f\ncontent %.1f + inset %.1f/%.1f",
-            effectiveHeight,
-            symbol,
-            boundsHeight,
-            contentHeight,
-            inset.top,
-            inset.bottom
-        )
+        if updatesVisibleLabel {
+            contentMetricsLabel.text = String(
+                format: "有效 %.1f %@ 可视 %.1f\ncontent %.1f + inset %.1f/%.1f",
+                effectiveHeight,
+                symbol,
+                boundsHeight,
+                contentHeight,
+                inset.top,
+                inset.bottom
+            )
+        }
         let marker = String(
             format: "mode=%@;content=%.6f;bounds=%.6f;insetTop=%.6f;insetBottom=%.6f;effective=%.6f;scrollable=%.6f;offsetY=%.6f;minimumOffsetY=%.6f;maximumOffsetY=%.6f;relation=%@",
             selectedContentAmount.code,
@@ -348,11 +342,6 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
         contentScrollView.accessibilityValue = marker
     }
 
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard scrollView === contentScrollView else { return }
-        updateContentMetrics()
-    }
-
     private func displayRelation(for amount: ContentAmount) -> String {
         switch amount {
         case .smaller: return "有效内容小于可视区"
@@ -361,14 +350,6 @@ final class FreePanelViewController: DemoScenarioViewController, UIScrollViewDel
         }
     }
 
-    @objc private func collapsePanel() {
-        dragEngine.move(
-            toDisplayHeight: 104,
-            animated: true,
-            options: .init(),
-            completion: nil
-        )
-    }
 }
 
 final class MovementLabViewController: DemoScenarioViewController {

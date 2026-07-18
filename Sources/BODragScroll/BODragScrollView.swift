@@ -15,6 +15,9 @@ final class BODragScrollPanelState {
     var lastLayoutBounds = CGRect.zero
     var hasCompletedLayout = false
     var needsPanelLayout = false
+    /// A provider replacement can change panel size, but an active composite axis must remain
+    /// immutable until its physical lifecycle ends.
+    var defersConfigurationLayoutUntilCaptureEnds = false
     var pendingInitialDisplayHeight: CGFloat?
     var preservedDisplayHeightForNextLayout: CGFloat?
     var replacementGeneration: UInt64 = 0
@@ -25,12 +28,29 @@ final class BODragScrollDragState {
     var lastMotionSource: BODragScrollMotionSource = .panel
 }
 
+enum BODragScrollOverscrollEdge: Equatable {
+    case top
+    case bottom
+}
+
+/// A temporary coordinate outside the legal composite axis.
+///
+/// The host UIScrollView remains the only physical scroll driver. `owner` only describes which
+/// visible object receives that host overscroll when the current projection is committed.
+struct BODragScrollOverscrollState: Equatable {
+    let edge: BODragScrollOverscrollEdge
+    let owner: SegmentOwner
+    let boundaryOffset: CGFloat
+    let distance: CGFloat
+}
+
 @MainActor
 final class BODragScrollScrollingState {
     var mismatchDirection = 0
     var isForcingMismatchRecovery = false
     var lastPublishedParticipantScrolling = false
     var callbackEpoch: UInt64 = 0
+    var overscroll: BODragScrollOverscrollState?
 }
 
 @MainActor
@@ -157,8 +177,12 @@ public final class BODragScrollView: UIScrollView {
         didSet {
             advanceDecisionGeometryRevision()
             runtime.panel.needsPanelLayout = true
-            setNeedsLayout()
-            reloadScrollMetrics()
+            if reloadCaptureMetricsForConfigurationChange() {
+                runtime.panel.defersConfigurationLayoutUntilCaptureEnds = false
+                setNeedsLayout()
+            } else {
+                runtime.panel.defersConfigurationLayoutUntilCaptureEnds = true
+            }
         }
     }
 
@@ -180,6 +204,9 @@ public final class BODragScrollView: UIScrollView {
 
         advanceDecisionGeometryRevision()
         runtime.panel.needsPanelLayout = true
+        // This API is an explicit request to reconcile panel size now. Unlike an incidental
+        // provider replacement, it already owns the coherent layout-interruption path below.
+        runtime.panel.defersConfigurationLayoutUntilCaptureEnds = false
 
         if runtime.panel.hasCompletedLayout,
            runtime.panel.lastLayoutBounds.size == bounds.size,
@@ -213,6 +240,8 @@ public final class BODragScrollView: UIScrollView {
     private var nonSnappingRangesStorage: [ClosedRange<CGFloat>] = []
     private var minimumDisplayHeightStorage: CGFloat?
     private var configurationStorage = BODragScrollConfiguration()
+    /// Notification baseline only. `displayHeight` itself always stores the latest real geometry.
+    private var displayHeightChangeBaseline: CGFloat = 0
 
     /// The panel's own rate. During participant-owned portions the inherited scroll view temporarily mirrors
     /// the primary participant's rate without changing this stored preference.
@@ -339,6 +368,12 @@ public final class BODragScrollView: UIScrollView {
         let sizeChanged = previousBounds.size != bounds.size
         runtime.panel.lastLayoutBounds = bounds
 
+        if sizeChanged {
+            // A viewport generation change cannot retain the old geometry; the existing layout
+            // interruption path below becomes the new owner and applies any pending provider size.
+            runtime.panel.defersConfigurationLayoutUntilCaptureEnds = false
+        }
+
         if sizeChanged,
            runtime.panel.hasCompletedLayout,
            let panelView = panelViewStorage {
@@ -359,7 +394,11 @@ public final class BODragScrollView: UIScrollView {
             }
         }
 
-        if sizeChanged || !runtime.panel.hasCompletedLayout || runtime.panel.needsPanelLayout {
+        let mayApplyRequestedPanelLayout = !runtime.panel
+            .defersConfigurationLayoutUntilCaptureEnds
+        if sizeChanged
+            || !runtime.panel.hasCompletedLayout
+            || (runtime.panel.needsPanelLayout && mayApplyRequestedPanelLayout) {
             layoutPanel(previousBounds: previousBounds)
         }
 
@@ -456,17 +495,18 @@ public final class BODragScrollView: UIScrollView {
             var requestedOffset = proposedDisplayHeight - viewportHeight
             if !requestedOffset.isFinite {
                 requestedOffset = minimumOffset
+                proposedDisplayHeight = effectiveMinimumDisplayHeight
             } else if requestedOffset < minimumOffset,
                       !configuration.bounce.allowsPanelTopBounce {
                 requestedOffset = minimumOffset
+                proposedDisplayHeight = effectiveMinimumDisplayHeight
             } else if requestedOffset > maximumOffset,
                       !configuration.bounce.allowsPanelBottomBounce {
                 requestedOffset = maximumOffset
+                proposedDisplayHeight = detentHeightsStorage.last.map {
+                    max(effectiveMinimumDisplayHeight, $0)
+                } ?? max(effectiveMinimumDisplayHeight, panelSize.height)
             }
-            proposedDisplayHeight = normalizeFinite(
-                viewportHeight + requestedOffset,
-                fallback: effectiveMinimumDisplayHeight
-            )
         }
 
         guard preparePendingInitialLayoutMovement(
@@ -508,12 +548,12 @@ public final class BODragScrollView: UIScrollView {
         runtime.panel.preservedDisplayHeightForNextLayout = nil
         advanceDecisionGeometryRevision()
 
-        // Mark base panel geometry ready before capture rebuild publishes display changes. A
-        // callback from rebuild can then execute directly instead of creating a stranded pending
-        // request.
+        // Mark base panel geometry ready before capture rebuild. Any reentrant request from a
+        // provider/participant callback can then execute directly instead of becoming stranded.
         let preparedMovement = takePendingMovementForCompletedLayout(
             expectedTransactionID: pendingMovementIDBeforeProvider
         )
+        let layoutMovementEpoch = runtime.transition.nextTransactionID
         rebuildCaptureSessionIfNeeded(reason: .layout)
         guard panelViewStorage === panelView,
               runtime.panel.replacementGeneration == layoutPanelGeneration else {
@@ -521,14 +561,38 @@ public final class BODragScrollView: UIScrollView {
             setNeedsLayout()
             return
         }
-        setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
-        guard panelViewStorage === panelView,
-              runtime.panel.replacementGeneration == layoutPanelGeneration else {
-            // didChangeDisplayHeight is client code. A replacement triggered there owns the
-            // pending size-change interruption and must finish it after its own coherent layout.
-            runtime.panel.needsPanelLayout = true
-            setNeedsLayout()
-            return
+        if runtime.transition.nextTransactionID == layoutMovementEpoch {
+            // Capture rebuild may rewrite coordinated geometry. The layout height is nevertheless
+            // a known model value, so remove only a sub-pixel frame-conversion residue. A movement
+            // created by a rebuild callback owns newer geometry and deliberately skips this block.
+            withInternalMutation {
+                correctDisplayHeightResidual(to: proposedDisplayHeight)
+            }
+            guard panelViewStorage === panelView,
+                  runtime.panel.replacementGeneration == layoutPanelGeneration else {
+                // A frame observer may synchronously replace the panel after the protected write.
+                // The replacement owns its own layout and must not receive this panel's height.
+                runtime.panel.needsPanelLayout = true
+                setNeedsLayout()
+                return
+            }
+        }
+        let newerMovementOwnsHeightPublication =
+            runtime.transition.nextTransactionID != layoutMovementEpoch
+            && runtime.transition.activeTransaction != nil
+        if !newerMovementOwnsHeightPublication {
+            // Advancing the epoch does not prove that a newer transaction published geometry: an
+            // invalid request can begin and cancel synchronously. Unless a newer transaction is
+            // still active, publish the real layout readback so public state cannot remain stale.
+            setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
+            guard panelViewStorage === panelView,
+                  runtime.panel.replacementGeneration == layoutPanelGeneration else {
+                // didChangeDisplayHeight is client code. A replacement triggered there owns the
+                // pending size-change interruption and must finish it after its own coherent layout.
+                runtime.panel.needsPanelLayout = true
+                setNeedsLayout()
+                return
+            }
         }
         completePendingLayoutInterruptionIfNeeded()
         performPreparedMovementAfterLayoutIfNeeded(preparedMovement)
@@ -550,8 +614,8 @@ public final class BODragScrollView: UIScrollView {
     }
 
     var displayScale: CGFloat {
-        let scale = window?.screen.scale ?? UIScreen.main.scale
-        return scale.isFinite && scale > 0 ? scale : 1
+        let candidates = [window?.screen.scale, traitCollection.displayScale, UIScreen.main.scale]
+        return candidates.compactMap { $0 }.first(where: { $0.isFinite && $0 > 0 }) ?? 1
     }
 
     var comparisonPolicy: ScrollComparisonPolicy {
@@ -664,13 +728,32 @@ public final class BODragScrollView: UIScrollView {
         }
     }
 
+    /// Corrects only a panel-frame arithmetic residue around a model-authoritative height.
+    /// One physical pixel is the admission boundary for attempting the single correction; the
+    /// public height is still read back from real geometry rather than replaced with the target.
+    func correctDisplayHeightResidual(to targetDisplayHeight: CGFloat) {
+        guard let panelView = panelViewStorage, targetDisplayHeight.isFinite else { return }
+        let actualDisplayHeight = displayHeightForCurrentGeometry
+        guard actualDisplayHeight.isFinite, actualDisplayHeight != targetDisplayHeight else { return }
+
+        let residual = actualDisplayHeight - targetDisplayHeight
+        guard abs(residual) < comparisonPolicy.boundaryBand else { return }
+
+        var frame = panelView.frame
+        frame.origin.y += residual
+        setPanelFrame(frame)
+    }
+
     func setDisplayHeight(_ value: CGFloat, source: BODragScrollMotionSource) {
         let finiteValue = normalizeFinite(value, fallback: displayHeight)
         runtime.drag.lastMotionSource = source
-        guard !comparisonPolicy.isJitterEqual(displayHeight, finiteValue) else { return }
+        guard displayHeight != finiteValue else { return }
 
         displayHeight = finiteValue
-        transitionDidChangeDisplayHeightDuringDrag()
+        // Compare against the last notified value, not the immediately preceding model sample. A
+        // series of real changes below 0.0001pt can therefore accumulate into one later callback.
+        guard !comparisonPolicy.isValueEqual(displayHeightChangeBaseline, finiteValue) else { return }
+        displayHeightChangeBaseline = finiteValue
         eventDelegate?.dragScrollView(self, didChangeDisplayHeight: finiteValue)
     }
 
@@ -743,6 +826,7 @@ public final class BODragScrollView: UIScrollView {
 
         runtime.panel.hasCompletedLayout = false
         runtime.panel.needsPanelLayout = false
+        runtime.panel.defersConfigurationLayoutUntilCaptureEnds = false
         runtime.panel.lastLayoutBounds = .zero
         transitionPanelLayoutDidInvalidate()
         if newValue == nil {
@@ -765,15 +849,16 @@ public final class BODragScrollView: UIScrollView {
 
     private func outerGeometryConfigurationDidChange() {
         advanceDecisionGeometryRevision()
-        updateOuterInsetsPreservingOffset()
-        reloadScrollMetrics()
-        setNeedsLayout()
+        if reloadCaptureMetricsForConfigurationChange() {
+            setNeedsLayout()
+        }
     }
 
     private func behaviorConfigurationDidChange() {
         advanceDecisionGeometryRevision()
-        reloadScrollMetrics()
-        setNeedsLayout()
+        if reloadCaptureMetricsForConfigurationChange() {
+            setNeedsLayout()
+        }
     }
 
     private func normalizedRanges(_ ranges: [ClosedRange<CGFloat>]) -> [ClosedRange<CGFloat>] {

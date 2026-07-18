@@ -572,11 +572,14 @@ public extension BODragScrollBehaviorProvider {
 /// main actor at their documented UIKit lifecycle point; decisions belong to the behavior provider.
 @MainActor
 public protocol BODragScrollEventDelegate: AnyObject {
+    /// A value-change notification for the panel's current real display height.
     func dragScrollView(
         _ dragScrollView: BODragScrollView,
         didChangeDisplayHeight displayHeight: CGFloat
     )
 
+    /// A scrolling-event notification. Each host scroll event accepted by the engine is forwarded;
+    /// it is not coalesced merely because the display height is unchanged.
     func dragScrollView(
         _ dragScrollView: BODragScrollView,
         didScroll update: BODragScrollUpdate

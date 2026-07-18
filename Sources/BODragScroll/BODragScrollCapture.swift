@@ -19,6 +19,14 @@ enum BODragScrollCaptureRebuildReason {
     case explicitReload
 }
 
+/// How participant geometry is released when a composite capture ends.
+enum BODragScrollCaptureTeardownDisposition {
+    /// Normal physics reached a legal endpoint. Only remove arithmetic residue at that endpoint.
+    case settled
+    /// External ownership/layout changed before physics settled. Restore a legal standalone offset.
+    case forced
+}
+
 private enum BODragScrollParticipantSegmentSource {
     case smart
     case specified
@@ -52,6 +60,9 @@ final class BODragScrollCaptureSession {
     var prioritiesByScrollViewID: [ObjectIdentifier: BODragScrollCapturePriority]
     weak var webView: UIView?
     var model: ScrollModel?
+    /// Participant metrics changed while this touch's physical model was in use. The active
+    /// lifecycle keeps its touch-down snapshot; the next capture must build a fresh session.
+    var hasDeferredMetricsChange = false
 
     init(
         id: UInt64,
@@ -79,6 +90,10 @@ final class BODragScrollCaptureSession {
 @MainActor
 final class BODragScrollCaptureState {
     var session: BODragScrollCaptureSession?
+    /// The view whose touch encountered a dirty session while an older physical release still
+    /// owned it. A tracking-only touch keeps the old model; an actual drag rebuilds from this view
+    /// only after the old driver has been interrupted.
+    weak var deferredTouchViewForFreshCapture: UIView?
     let hostLeaseCleanup = BODragScrollHostLeaseCleanup()
     var nextSessionID: UInt64 = 1
     var nextOwnershipGeneration: UInt64 = 1
@@ -96,8 +111,63 @@ final class BODragScrollCaptureState {
 extension BODragScrollView {
     /// Re-snapshot the current participants and rebuild the composite scroll model.
     public func reloadScrollMetrics() {
+        guard !deferCaptureMetricsReloadIfPhysicalLifecycleIsActive() else { return }
+        reloadCaptureMetrics(reason: .explicitReload)
+    }
+
+    /// Policy objects become visible immediately, while the composite geometry remains immutable
+    /// for the active physical lifecycle. Returns whether the reload was applied synchronously.
+    @discardableResult
+    func reloadCaptureMetricsForConfigurationChange() -> Bool {
+        // No dirty flag is needed here: unlike participant metrics, configuration changes never
+        // require forced reconciliation. Keeping the current model is sufficient; teardown drops
+        // it and the next capture/layout naturally reads the new policy.
+        guard runtime.capture.session == nil || !captureModelIsOwnedByPhysicalLifecycle else {
+            return false
+        }
+        reloadCaptureMetrics(reason: .configuration)
+        return true
+    }
+
+    private func reloadCaptureMetrics(reason: BODragScrollCaptureRebuildReason) {
         updateOuterInsetsPreservingOffset()
-        rebuildCaptureSessionIfNeeded(reason: .explicitReload)
+        rebuildCaptureSessionIfNeeded(reason: reason)
+    }
+
+    @discardableResult
+    func deferCaptureMetricsReloadIfPhysicalLifecycleIsActive() -> Bool {
+        guard let session = runtime.capture.session else { return false }
+        guard captureModelIsOwnedByPhysicalLifecycle else { return false }
+        session.hasDeferredMetricsChange = true
+        return true
+    }
+
+    private var captureModelIsOwnedByPhysicalLifecycle: Bool {
+        let nativeState = nativeScrollState
+        return runtime.transition.isUserDragLifecycleActive
+            || runtime.transition.driver != nil
+            || runtime.transition.isAwaitingDidEndDecelerating
+            || nativeState.isTracking
+            || nativeState.isDecelerating
+            || hostOverscrollState() != nil
+    }
+
+    /// Whether an existing session is still the immutable axis of the current physical touch.
+    /// Tracking alone is insufficient because it can also be the first touch of a new lifecycle;
+    /// in the continuation case the exact cleanup token still names this session generation.
+    private func physicalLifecycleStillOwnsExistingCapture(
+        _ session: BODragScrollCaptureSession
+    ) -> Bool {
+        let nativeState = nativeScrollState
+        let cleanupOwnership = runtime.transition.captureCleanupOwnership
+        let trackingOwnsSession = nativeState.isTracking
+            && cleanupOwnership?.sessionID == session.id
+            && cleanupOwnership?.sessionOwnershipGeneration == session.ownershipGeneration
+        return runtime.transition.isUserDragLifecycleActive
+            || runtime.transition.driver != nil
+            || runtime.transition.isAwaitingDidEndDecelerating
+            || nativeState.isDecelerating
+            || trackingOwnsSession
     }
 
     var activeScrollModel: ScrollModel? {
@@ -220,7 +290,10 @@ extension BODragScrollView {
 
     /// Start or refresh a capture session from the deepest hit-tested view. Returns its containing Web view.
     @discardableResult
-    func beginCapture(from touchedView: UIView) -> UIView? {
+    func beginCapture(
+        from touchedView: UIView,
+        requiresFreshSession: Bool = false
+    ) -> UIView? {
 #if DEBUG
         let canCaptureWithoutWindow = runtime.capture.allowsOffWindowCaptureForTesting
 #else
@@ -235,6 +308,24 @@ extension BODragScrollView {
             // acquisition is explicitly suspended by teardown/replacement/window removal.
             return scanCandidates(from: touchedView, asksProvider: false).webView
         }
+        let physicalSessionAtEntry: BODragScrollCaptureSession? = {
+            guard !requiresFreshSession,
+                  let session = runtime.capture.session,
+                  session.hierarchy.isValid(),
+                  physicalLifecycleStillOwnsExistingCapture(session) else { return nil }
+            return session
+        }()
+        func deferPhysicalCaptureReplacementIfNeeded() -> Bool {
+            guard let session = physicalSessionAtEntry,
+                  runtime.capture.session === session,
+                  session.hierarchy.isValid(),
+                  physicalLifecycleStillOwnsExistingCapture(session) else { return false }
+            // Touch-down may select another sibling chain, no participant, or a Web view. Keep the
+            // old immutable axis until UIKit confirms a real drag; the will-begin path then asks
+            // for a fresh session from this exact touched view. A tap-only touch never swaps axes.
+            runtime.capture.deferredTouchViewForFreshCapture = touchedView
+            return true
+        }
         let operationEpoch = advanceCaptureOperationEpoch()
         let scan = scanCandidates(from: touchedView, asksProvider: true)
         let webView = scan.webView
@@ -244,7 +335,9 @@ extension BODragScrollView {
         }
 
         if webView != nil, configuration.capture.disablesPanelInteractionInWebView {
-            endCapture()
+            if !deferPhysicalCaptureReplacementIfNeeded() {
+                endCapture()
+            }
             return webView
         }
 
@@ -264,7 +357,9 @@ extension BODragScrollView {
               scan.eligibleIDs.contains(requestedPrimaryID),
               let originalPrimary = scan.candidates.first(where: { $0.id == requestedPrimaryID }),
               proposal.candidates.contains(where: { $0.id == requestedPrimaryID }) else {
-            endCapture()
+            if !deferPhysicalCaptureReplacementIfNeeded() {
+                endCapture()
+            }
             return webView
         }
 
@@ -286,12 +381,16 @@ extension BODragScrollView {
                includeStart: true,
                participatingOnly: false
            ).count >= 2 {
-            endCapture()
+            if !deferPhysicalCaptureReplacementIfNeeded() {
+                endCapture()
+            }
             return webView
         }
 
         guard let primaryIndex = scan.candidates.firstIndex(where: { $0.id == requestedPrimaryID }) else {
-            endCapture()
+            if !deferPhysicalCaptureReplacementIfNeeded() {
+                endCapture()
+            }
             return webView
         }
 
@@ -311,7 +410,9 @@ extension BODragScrollView {
                 == scan.candidates.map({ ObjectIdentifier($0.scrollView) }),
               stableScan.webView === webView,
               let capturePanel = panelView else {
-            endCapture()
+            if !deferPhysicalCaptureReplacementIfNeeded() {
+                endCapture()
+            }
             return webView
         }
         let hierarchy = BODragScrollCaptureHierarchySnapshot(
@@ -320,35 +421,56 @@ extension BODragScrollView {
             participantChain: chainViews
         )
         guard hierarchy.isValid(expectedPrimary: chainViews.first) else {
-            endCapture()
+            if !deferPhysicalCaptureReplacementIfNeeded() {
+                endCapture()
+            }
             return webView
         }
 
-        if let existing = runtime.capture.session,
-           existing.participantChain.compactMap(\.scrollView).map(ObjectIdentifier.init)
-            == chainViews.map(ObjectIdentifier.init),
-           existing.hierarchy.isValid(),
-           existing.hierarchy.hasSameIdentity(as: hierarchy),
-           existing.participantChain.allSatisfy({ participant in
-               guard let scrollView = participant.scrollView else { return false }
-               return BODragScrollUIScrollViewBridge.ownsCaptureLease(
-                   for: scrollView,
-                   host: self,
-                   captureSessionID: existing.id
-               )
-           }) {
-            existing.ownershipGeneration = runtime.capture.nextOwnershipGeneration
-            runtime.capture.nextOwnershipGeneration &+= 1
-            transitionCaptureOwnershipDidRefresh(to: existing)
-            existing.prioritiesByScrollViewID = priorities
-            existing.webView = webView
-            rebuildCaptureSessionIfNeeded(reason: .initialCapture)
+        if !requiresFreshSession, let existing = runtime.capture.session {
+            let physicalLifecycleStillOwnsCapture =
+                physicalLifecycleStillOwnsExistingCapture(existing)
+            if (!existing.hasDeferredMetricsChange || physicalLifecycleStillOwnsCapture),
+               existing.participantChain.compactMap(\.scrollView).map(ObjectIdentifier.init)
+                == chainViews.map(ObjectIdentifier.init),
+               existing.hierarchy.isValid(),
+               existing.hierarchy.hasSameIdentity(as: hierarchy),
+               existing.participantChain.allSatisfy({ participant in
+                   guard let scrollView = participant.scrollView else { return false }
+                   return BODragScrollUIScrollViewBridge.ownsCaptureLease(
+                       for: scrollView,
+                       host: self,
+                       captureSessionID: existing.id
+                   )
+               }) {
+                existing.ownershipGeneration = runtime.capture.nextOwnershipGeneration
+                runtime.capture.nextOwnershipGeneration &+= 1
+                transitionCaptureOwnershipDidRefresh(to: existing)
+                existing.prioritiesByScrollViewID = priorities
+                existing.webView = webView
+                runtime.capture.deferredTouchViewForFreshCapture = existing.hasDeferredMetricsChange
+                    ? touchedView
+                    : nil
+                // A touch that interrupts an in-flight movement is taking over the same physical
+                // composite axis. Rebuilding from temporarily projected participant offsets would
+                // reinterpret bounce/deceleration geometry as a new model and can fold overscroll
+                // back to a boundary. A real drag explicitly requests a fresh dirty session after
+                // it has interrupted the old driver in `scrollViewWillBeginDragging`.
+                if !physicalLifecycleStillOwnsCapture {
+                    rebuildCaptureSessionIfNeeded(reason: .initialCapture)
+                }
+                return webView
+            }
+        }
+
+        if deferPhysicalCaptureReplacementIfNeeded() {
             return webView
         }
 
         // Keep this capture operation's epoch while replacing the old session. Teardown may emit a
         // display-height callback; if that callback starts a newer operation, do not install the
         // superseded session afterward.
+        runtime.capture.deferredTouchViewForFreshCapture = nil
         teardownCaptureSession()
         guard isCurrentCaptureOperation(operationEpoch) else {
             return webView
@@ -542,11 +664,13 @@ extension BODragScrollView {
         )
     }
 
-    func endCapture() {
+    func endCapture(
+        disposition: BODragScrollCaptureTeardownDisposition = .forced
+    ) {
         suspendCaptureAcquisition()
         defer { resumeCaptureAcquisition() }
         _ = advanceCaptureOperationEpoch()
-        teardownCaptureSession()
+        teardownCaptureSession(disposition: disposition)
     }
 
     @discardableResult
@@ -559,8 +683,14 @@ extension BODragScrollView {
         runtime.capture.operationEpoch == epoch
     }
 
-    private func teardownCaptureSession() {
+    private func teardownCaptureSession(
+        disposition: BODragScrollCaptureTeardownDisposition = .forced
+    ) {
+        runtime.capture.deferredTouchViewForFreshCapture = nil
         guard let session = runtime.capture.session else { return }
+        let hadCompositeModel = session.model != nil
+        let effectiveDisposition: BODragScrollCaptureTeardownDisposition = session
+            .hasDeferredMetricsChange ? .forced : disposition
         let currentDisplayHeight = displayHeightForCurrentGeometry
         let panelHeight = panelView?.frame.height ?? 0
         var panelFrame = panelView?.frame ?? .zero
@@ -578,6 +708,7 @@ extension BODragScrollView {
 
         let teardownEpoch = runtime.capture.operationEpoch
         runtime.scrolling.mismatchDirection = 0
+        runtime.scrolling.overscroll = nil
         // Restore one complete panel-only geometry before any callback-bearing participant or
         // `scrollsToTop` write. Client code must never observe a nil session with composite
         // contentSize/panel translation still installed.
@@ -598,13 +729,17 @@ extension BODragScrollView {
             participant.observations.forEach { $0.invalidate() }
             participant.observations.removeAll()
             guard let scrollView = participant.scrollView else { continue }
-            if session.hierarchy.isValid(),
+            if hadCompositeModel,
+               session.hierarchy.isValid(),
                BODragScrollUIScrollViewBridge.ownsCaptureLease(
-                for: scrollView,
-                host: self,
-                captureSessionID: session.id
-            ) {
-                normalizeBounceOffset(of: scrollView)
+                   for: scrollView,
+                   host: self,
+                   captureSessionID: session.id
+               ) {
+                reconcileParticipantOffset(
+                    of: scrollView,
+                    disposition: effectiveDisposition
+                )
             }
             BODragScrollUIScrollViewBridge.releaseCaptureLease(
                 for: scrollView,
@@ -617,9 +752,18 @@ extension BODragScrollView {
         guard isCurrentCaptureOperation(teardownEpoch),
               runtime.capture.session == nil else { return }
         setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
+        guard isCurrentCaptureOperation(teardownEpoch),
+              runtime.capture.session == nil else { return }
+        if runtime.panel.defersConfigurationLayoutUntilCaptureEnds {
+            runtime.panel.defersConfigurationLayoutUntilCaptureEnds = false
+            setNeedsLayout()
+        }
     }
 
-    private func normalizeBounceOffset(of scrollView: UIScrollView) {
+    private func reconcileParticipantOffset(
+        of scrollView: UIScrollView,
+        disposition: BODragScrollCaptureTeardownDisposition
+    ) {
         let inset = scrollView.effectiveContentInset
         guard inset.top.isFinite,
               inset.bottom.isFinite,
@@ -634,7 +778,21 @@ extension BODragScrollView {
         )
         guard minimum.isFinite, maximum.isFinite else { return }
         var target = scrollView.contentOffset
-        target.y = min(maximum, max(minimum, target.y))
+        switch disposition {
+        case .settled:
+            // A normal terminal path must never hide a real bounce by synchronously clamping it.
+            // UIKit/model arithmetic may leave an endpoint such as 600.0000000000001; only that
+            // numeric residue is canonicalized before the participant resumes standalone ownership.
+            if comparisonPolicy.isValueEqual(target.y, minimum) {
+                target.y = minimum
+            } else if comparisonPolicy.isValueEqual(target.y, maximum) {
+                target.y = maximum
+            } else {
+                return
+            }
+        case .forced:
+            target.y = min(maximum, max(minimum, target.y))
+        }
         guard target != scrollView.contentOffset else { return }
         scrollView.setContentOffset(target, animated: false)
     }
@@ -704,6 +862,18 @@ extension BODragScrollView {
             return
         }
         participant.lastContentSize = scrollView.contentSize
+        if deferCaptureMetricsReloadIfPhysicalLifecycleIsActive() {
+            // One physical lifecycle owns one immutable composite axis. Rebuilding from a
+            // projected bounce offset would reinterpret temporary geometry as a mathematical
+            // start and can fold the bounce to a boundary. Teardown reconciles against the new
+            // standalone range, then the next touch builds a fresh session/model.
+            restoreProjectionAfterDeferredParticipantMetricsChange(
+                for: participantID,
+                scrollView: scrollView,
+                in: session
+            )
+            return
+        }
         rebuildCaptureSessionIfNeeded(reason: .observedMetrics)
     }
 }
@@ -773,7 +943,7 @@ extension BODragScrollView {
         var candidateProjection = builtModel.projection(at: candidateOuterOffset)
         var compatible = state.isValidPrefix
             && projection(candidateProjection, matches: session)
-            && builtModel.comparison.isJitterEqual(
+            && builtModel.comparison.isValueEqual(
                 candidateProjection.displayHeight,
                 currentDisplayHeight
             )
@@ -829,7 +999,6 @@ extension BODragScrollView {
             return
         }
         session.model = builtModel
-
         let totalParticipantDistance = builtModel.segments.reduce(CGFloat.zero) {
             $0 + ($1.isParticipantSegment ? $1.outerLength : 0)
         }
@@ -892,7 +1061,14 @@ extension BODragScrollView {
             endCapture()
             return
         }
-        setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
+        // Layout owns one final correction/publication after the complete capture rebuild. Publishing
+        // here would expose an intermediate geometry and let a reentrant movement race the old
+        // layout target. Other rebuild reasons remain self-contained and publish immediately.
+        if case .layout = reason {
+            // Intentionally deferred to `layoutPanel(previousBounds:)`.
+        } else {
+            setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
+        }
         _ = ensureCaptureSessionIsCurrentAndHierarchyValid(session)
     }
 
@@ -1126,12 +1302,20 @@ extension BODragScrollView {
         let originY = panelOriginY(of: scrollView)
         let scrollHeight = max(scrollView.frame.height, 1)
         let minimumRatio = configuration.handoff.minimumInnerVisibilityRatio
-        let startIndex = ScrollMath.sortedIndex(
+        var startIndex = ScrollMath.sortedIndex(
             in: detentHeights.map(ScrollSourceScalar.native),
             value: currentDisplayHeight,
-            nearby: false,
+            nearby: true,
             ceil: true
         )
+        let nearbyHeight = detentHeights[startIndex]
+        // Within the one-pixel scene band, start from the nearest detent. Outside it, restore ceil
+        // semantics so the automatic search never begins below the panel's current scene.
+        if !comparisonPolicy.isWithinBoundaryBand(currentDisplayHeight, nearbyHeight),
+           nearbyHeight < currentDisplayHeight,
+           startIndex + 1 < detentHeights.count {
+            startIndex += 1
+        }
 
         for index in startIndex..<detentHeights.count {
             let detent = detentHeights[index]
@@ -1163,8 +1347,8 @@ extension BODragScrollView {
         } ?? detentHeights.last
     }
 
-    /// Mirrors the source's temporary `theattachar` suffix. This is an exact source-number
-    /// decision: the one-physical-pixel comparison band is intentionally not used here.
+    /// Mirrors the source's temporary `theattachar` suffix. The nearest detent belongs to the
+    /// current force-bounce scene only when it is strictly inside the one-physical-pixel band.
     private func detentHeightsForCapture(currentDisplayHeight: CGFloat) -> [CGFloat] {
         let detents = runtimeDetentHeights
         guard configuration.bounce.forcesInnerTopBounce,
@@ -1178,7 +1362,10 @@ extension BODragScrollView {
         )
         guard index > 0,
               detents.indices.contains(index),
-              detents[index] == currentDisplayHeight else { return detents }
+              comparisonPolicy.isWithinBoundaryBand(
+                  detents[index],
+                  currentDisplayHeight
+              ) else { return detents }
         return Array(detents[index...])
     }
 
@@ -1252,7 +1439,7 @@ extension BODragScrollView {
         in model: ScrollModel,
         session: BODragScrollCaptureSession
     ) -> CompositeState {
-        let epsilon = model.comparison.jitterEpsilon
+        let comparison = model.comparison
         let participantSegments = model.segments.filter(\.isParticipantSegment)
         guard !participantSegments.isEmpty else {
             return CompositeState(progress: 0, isValidPrefix: true)
@@ -1269,12 +1456,16 @@ extension BODragScrollView {
                   let value = session.participant(with: id)?.scrollView?.contentOffset.y else {
                 return CompositeState(progress: 0, isValidPrefix: false)
             }
-            guard value >= segment.innerStart - epsilon,
-                  value <= segment.innerEnd + epsilon else { continue }
+            let normalizedValue = comparison.snappingToNearestEndpoint(
+                value,
+                segment.innerStart,
+                segment.innerEnd
+            )
+            guard normalizedValue >= segment.innerStart,
+                  normalizedValue <= segment.innerEnd else { continue }
 
-            let clampedValue = min(segment.innerEnd, max(segment.innerStart, value))
             candidateOuterOffsets.append(
-                segment.outerStart + clampedValue - segment.innerStart
+                segment.outerStart + normalizedValue - segment.innerStart
             )
         }
 
@@ -1297,10 +1488,15 @@ extension BODragScrollView {
                   let value = session.participant(with: id)?.scrollView?.contentOffset.y else {
                 return CompositeState(progress: progress, isValidPrefix: false)
             }
-            if value >= segment.innerEnd - epsilon {
+            let normalizedValue = comparison.snappingToNearestEndpoint(
+                value,
+                segment.innerStart,
+                segment.innerEnd
+            )
+            if normalizedValue >= segment.innerEnd {
                 progress += segment.innerLength
-            } else if value > segment.innerStart + epsilon {
-                progress += value - segment.innerStart
+            } else if normalizedValue > segment.innerStart {
+                progress += normalizedValue - segment.innerStart
                 break
             } else {
                 break
@@ -1316,7 +1512,7 @@ extension BODragScrollView {
         projection.participantOffsets.allSatisfy { projected in
             guard let current = session.participant(with: projected.participantID)?.scrollView?.contentOffset.y
             else { return false }
-            return abs(current - projected.contentOffset) <= comparisonPolicy.jitterEpsilon
+            return comparisonPolicy.isValueEqual(current, projected.contentOffset)
         }
     }
 
@@ -1325,7 +1521,7 @@ extension BODragScrollView {
         session: BODragScrollCaptureSession,
         expectedProjection: Projection
     ) -> Int {
-        let epsilon = model.comparison.jitterEpsilon
+        let comparison = model.comparison
 
         // Compare every participant with the projection at the preserved composite position. The
         // first segment may belong to an ancestor, so using the primary scroll view unconditionally
@@ -1333,19 +1529,20 @@ extension BODragScrollView {
         for expected in expectedProjection.participantOffsets {
             guard let actual = session.participant(with: expected.participantID)?
                 .scrollView?.contentOffset.y else { continue }
-            if actual > expected.contentOffset + epsilon {
+            guard !comparison.isValueEqual(actual, expected.contentOffset) else { continue }
+            if actual > expected.contentOffset {
                 return 1
             }
-            if actual < expected.contentOffset - epsilon {
+            if actual < expected.contentOffset {
                 return -1
             }
         }
 
         let displayDelta = displayHeightForCurrentGeometry - expectedProjection.displayHeight
-        if displayDelta < -epsilon {
+        if !comparison.isValueEqual(displayDelta, 0), displayDelta < 0 {
             return 1
         }
-        if displayDelta > epsilon {
+        if !comparison.isValueEqual(displayDelta, 0), displayDelta > 0 {
             return -1
         }
 
@@ -1383,7 +1580,11 @@ extension BODragScrollView {
     func innerScrollCanConsume(_ scrollView: UIScrollView, gestureVelocityY: CGFloat) -> Bool {
         let range = scrollableRange(of: scrollView)
         guard range.maximum > range.minimum else { return false }
-        let current = scrollView.contentOffset.y
+        let current = comparisonPolicy.snappingToNearestEndpoint(
+            scrollView.contentOffset.y,
+            range.minimum,
+            range.maximum
+        )
         if current < range.minimum || current > range.maximum {
             return true
         }

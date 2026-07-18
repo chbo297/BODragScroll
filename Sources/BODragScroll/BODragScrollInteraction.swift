@@ -138,7 +138,10 @@ extension BODragScrollView {
         }
 
         let nativeState = nativeScrollState
-        if event != nil, isPerformingViewTransition || nativeState.isDecelerating {
+        let isInterruptingHostMotion = isPerformingViewTransition
+            || isPerformingSystemScrollTransition
+            || nativeState.isDecelerating
+        if event != nil, isInterruptingHostMotion {
             if let primary = primaryParticipantScrollView, lastMotionWasParticipant {
                 guard hierarchy(of: hitView) > 2 else {
                     return hitView
@@ -265,7 +268,7 @@ extension BODragScrollView {
         case .up:
             if !runtimeDetentHeights.isEmpty {
                 if let largestDetent = runtimeDetentHeights.last,
-                   displayHeight == largestDetent,
+                   comparisonPolicy.isWithinBoundaryBand(displayHeight, largestDetent),
                    inspectsParticipant {
                     if primaryParticipantScrollView == nil, window != nil {
                         let captureTransactionEpoch = runtime.transition.nextTransactionID

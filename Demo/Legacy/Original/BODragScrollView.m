@@ -55,7 +55,10 @@ static UIEdgeInsets sf_common_contentInset(UIScrollView * __nonnull scrollView) 
     }
 }
 
-#define sf_uifloat_equal(a, b) (fabs(a - b) <= 0.01)
+// 普通浮点近似相等：只忽略严格小于 0.0001pt 的差值。
+// 它不控制系统 delegate 回调次数，也不能替代物理像素场景边界或已知终点精确值。
+// delegate 回调中仅 displayHDidChange 可使用；didScroll 和 target 事件均不依据数值去重。
+#define sf_uifloat_equal(a, b) (fabs((a) - (b)) < 0.0001)
 
 #define sf_indictor_tag (9919)
 
@@ -73,105 +76,42 @@ typedef struct BODragScrollAttachInfo {
     CGFloat dragSVOffsetY2;
 } BODragScrollAttachInfo;
 
-static CGFloat sf_getOnePxiel(void) {
-    static CGFloat onepxiel;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        onepxiel = 1.f / [UIScreen mainScreen].scale;
-    });
-    return onepxiel;
+// 一个物理像素只用于离散场景和边界归属，不代表公开高度允许存在一个像素误差。
+// 不缓存 mainScreen.scale：view 可能位于外接屏幕，移动后也应使用当前屏幕的 scale。
+static CGFloat sf_onePhysicalPixel(UIView *view) {
+    CGFloat scale = view.window.screen.scale;
+    if (scale <= 0) {
+        scale = view.traitCollection.displayScale;
+    }
+    if (scale <= 0) {
+        scale = UIScreen.mainScreen.scale;
+    }
+    return 1.f / MAX(scale, 1.f);
 }
 
-#if DEBUG
-static void BODragScrollDebugLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
-static void BODragScrollDebugLog(NSString *format, ...) {
-    va_list arguments;
-    va_start(arguments, format);
-    NSString *body = [[NSString alloc] initWithFormat:format arguments:arguments];
-    va_end(arguments);
-
-    static dispatch_queue_t outputQueue;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        outputQueue = dispatch_queue_create("com.chbo297.BODragScrollDemo.oc-diagnostics",
-                                            DISPATCH_QUEUE_SERIAL);
-    });
-    dispatch_async(outputQueue, ^{
-        NSLog(@"~~~[OC] %@", body);
-    });
+/*
+ 只消除局部模型值在端点附近严格小于 0.0001pt 的算术尾差；不裁剪范围，
+ 不写 UIScrollView 的真实 offset，也不能代替一个物理像素的场景归属判断。
+ */
+static CGFloat sf_modelValueBySnappingToNearestEndpoint(CGFloat value,
+                                                        CGFloat endpointA,
+                                                        CGFloat endpointB) {
+    CGFloat distanceA = fabs(value - endpointA);
+    CGFloat distanceB = fabs(value - endpointB);
+    CGFloat nearestEndpoint = distanceA <= distanceB ? endpointA : endpointB;
+    if (!sf_uifloat_equal(value, nearestEndpoint)) {
+        return value;
+    }
+    return nearestEndpoint;
 }
 
-#define BODS_DEBUG_LOG(format, ...) BODragScrollDebugLog((format), ##__VA_ARGS__)
-
-static NSString *BODragScrollDebugNumberArrayDescription(NSArray<NSNumber *> *values) {
-    if (values.count == 0) {
-        return @"none";
-    }
-    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:values.count];
-    for (NSNumber *value in values) {
-        [parts addObject:[NSString stringWithFormat:@"%.2f", value.doubleValue]];
-    }
-    return [parts componentsJoinedByString:@"→"];
+static CGFloat sf_displayHeight(CGFloat viewportHeight,
+                                CGFloat contentOffsetY,
+                                CGRect embedViewFrame) {
+    // 用调用方给定的 viewportHeight 统一反算 model 几何；layout resize 时这里可传
+    // 旧 viewport 高度以保持原展示高度。不读取吸附目标，也不采样 presentation layer。
+    return viewportHeight - (CGRectGetMinY(embedViewFrame) - contentOffsetY);
 }
-
-static NSString *BODragScrollDebugViewDescription(UIView *view) {
-    if (!view) {
-        return @"nil";
-    }
-
-    NSString *identifier = view.accessibilityIdentifier.length > 0 ? view.accessibilityIdentifier : @"-";
-    if ([view isKindOfClass:[UIScrollView class]]) {
-        UIScrollView *scrollView = (UIScrollView *)view;
-        UIEdgeInsets inset = sf_common_contentInset(scrollView);
-        CGFloat minOffsetY = -inset.top;
-        CGFloat maxOffsetY = MAX(minOffsetY,
-                                 scrollView.contentSize.height + inset.bottom - CGRectGetHeight(scrollView.bounds));
-        return [NSString stringWithFormat:
-                @"%@<%p>{id=%@ frame=%@ bounds=%@ offset=%@ contentSize=%@ inset=%@ verticalRange=%.2f→%.2f}",
-                NSStringFromClass(view.class),
-                (void *)view,
-                identifier,
-                NSStringFromCGRect(view.frame),
-                NSStringFromCGRect(view.bounds),
-                NSStringFromCGPoint(scrollView.contentOffset),
-                NSStringFromCGSize(scrollView.contentSize),
-                NSStringFromUIEdgeInsets(inset),
-                minOffsetY,
-                maxOffsetY];
-    }
-
-    return [NSString stringWithFormat:@"%@<%p>{id=%@ frame=%@}",
-            NSStringFromClass(view.class),
-            (void *)view,
-            identifier,
-            NSStringFromCGRect(view.frame)];
-}
-
-static NSString *BODragScrollDebugPriorityDescription(NSInteger priority) {
-    switch (priority) {
-        case -1:
-            return @"-1(current/panel-first)";
-        case 0:
-            return @"0(simultaneous)";
-        case 1:
-            return @"1(other-scroll-first)";
-        case 2:
-            return @"2(system-default)";
-        case 3:
-            return @"3(coordinated-participant)";
-        default:
-            return @"not-applicable";
-    }
-}
-
-static UIScrollView *BODragScrollDebugScrollViewForPanGesture(UIGestureRecognizer *gestureRecognizer) {
-    if (![gestureRecognizer.view isKindOfClass:[UIScrollView class]]) {
-        return nil;
-    }
-    UIScrollView *scrollView = (UIScrollView *)gestureRecognizer.view;
-    return gestureRecognizer == scrollView.panGestureRecognizer ? scrollView : nil;
-}
-#endif
 
 static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
     Method originalMethod = class_getInstanceMethod(cls, originalSelector);
@@ -415,6 +355,8 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     BOOL _ignoreWaitDidTargetTo; //在内部设置时忽视_waitDidTargetTo
     BOOL _waitMayAnimationScroll;
     void (^_animationScrollDidEndBlock)(void);
+    // 自定义 displayHDidChange 的变化判定基线。当前 model 几何值仍逐次精确存储。
+    CGFloat _displayHChangeBaseline;
     
     //辅助运算
     CGFloat _minScrollInnerOSy; //捕获内部sc的可滑动最小Offsety
@@ -432,8 +374,6 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     __weak UIControl *_theCtrWhenDecInner; //decelerating时点击了某UIControl，为了不使scrollView的系统机制无效其点击事件，手动传递action
     BOOL _lastScrollIsInner; //最后一次滑动位置变化（包括内外），是否是捕获的内部sv
     NSValue *_scrollBeganLoc; //滑动开始的点
-    NSNumber *_dragBeganDH; //滑动开始的展示高度
-    BOOL _dragDHHasChange; //从拖拽起始，到终止，展示高度是否发生过变化（即使起终点相同，中间变化过也算）
     BODragScrollTapGes *_dsTapGes;
     
     //触发内部scrollView时会切换到内部scrollView的rate，用该处存储自己的的rate
@@ -443,15 +383,6 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     BOOL _needsRecoverScrollVAllowScrollToTop;
     
     BOOL _didTouchWebView;
-
-#if DEBUG
-    NSUInteger _boDebugTouchSequence;
-    BOOL _boDebugCollectingTouchCapture;
-    NSMutableArray<NSDictionary *> *_boDebugCaptureCandidates;
-    NSString *_boDebugCaptureBypassReason;
-    BOOL _boDebugHasOwnerState;
-    BOOL _boDebugLastOwnerWasInner;
-#endif
 }
 
 //在设置前后添加标识位，其它方法接收到滑动发生时，可根据标识位识别是否是此处设置导致。
@@ -467,6 +398,41 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
         innerSettingBlock();
         self.innerSetting = NO;
     }
+}
+
+// 统一从真实 model 几何读取当前高度；不读取吸附目标，也不使用容差修饰返回值。
+- (CGFloat)__currentDisplayHFromGeometry {
+    if (!_embedView) {
+        return 0;
+    }
+    return sf_displayHeight(CGRectGetHeight(self.bounds),
+                            self.contentOffset.y,
+                            _embedView.frame);
+}
+
+/*
+ 仅当真实几何与现有模型边界相差严格小于 0.0001pt 时，返回模型中已经存在的
+ 精确边界值。它不按一个物理像素吸附，不处理连续移动中的近似值，也不写 frame。
+ 这样 UIKit 的 frame/center 表示尾差不会进入下一轮模型继续参与计算。
+ */
+- (CGFloat)__displayHBySnappingToKnownModelBoundary:(CGFloat)displayH {
+    if (!isfinite(displayH)) {
+        return displayH;
+    }
+
+    if (self.attachDisplayHAr.count > 0) {
+        NSInteger idx = bo_findIdxInFloatArrayByValue(self.attachDisplayHAr,
+                                                       displayH,
+                                                       YES,
+                                                       NO);
+        CGFloat boundary = self.attachDisplayHAr[idx].floatValue;
+        return sf_uifloat_equal(displayH, boundary) ? boundary : displayH;
+    }
+
+    CGFloat minimum = self.minDisplayH ? self.minDisplayH.floatValue : 66;
+    CGFloat maximum = MAX(minimum,
+                          _embedView ? CGRectGetHeight(_embedView.frame) : minimum);
+    return sf_modelValueBySnappingToNearestEndpoint(displayH, minimum, maximum);
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -654,40 +620,11 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     NSInteger hierarchy = 0;
     
     UIView *thewebview = nil;
-
-#if DEBUG
-    NSInteger boDebugResponderDepth = 0;
-#endif
     
     while (resp) {
         if (self == resp) {
             break;
         }
-
-#if DEBUG
-        if (_boDebugCollectingTouchCapture &&
-            [resp isKindOfClass:[UIScrollView class]] &&
-            ![(UIScrollView *)resp isScrollEnabled]) {
-            UIScrollView *disabledScrollView = (UIScrollView *)resp;
-            UIEdgeInsets disabledInset = sf_common_contentInset(disabledScrollView);
-            BOOL disabledVertical =
-            (disabledScrollView.contentSize.height + disabledInset.top + disabledInset.bottom) >
-            CGRectGetHeight(disabledScrollView.bounds);
-            BOOL disabledHorizontal =
-            (disabledScrollView.contentSize.width + disabledInset.left + disabledInset.right) >
-            CGRectGetWidth(disabledScrollView.bounds);
-            [_boDebugCaptureCandidates addObject:@{
-                @"scrollView": disabledScrollView,
-                @"responderDepth": @(boDebugResponderDepth),
-                @"hierarchy": @(NSNotFound),
-                @"enabled": @NO,
-                @"canCapture": @NO,
-                @"vertical": @(disabledVertical),
-                @"horizontal": @(disabledHorizontal),
-                @"initialPriority": @(NSNotFound)
-            }];
-        }
-#endif
         
         if ([resp isKindOfClass:[UIScrollView class]] && [(UIScrollView *)resp isScrollEnabled]) {
             UIScrollView *scv = (UIScrollView *)resp;
@@ -741,26 +678,6 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                 //不处理捕获
                 priority = 2;
             }
-
-#if DEBUG
-            if (_boDebugCollectingTouchCapture) {
-                UIEdgeInsets debugInset = sf_common_contentInset(scv);
-                BOOL canScrollVertical =
-                (scv.contentSize.height + debugInset.top + debugInset.bottom) > CGRectGetHeight(scv.bounds);
-                BOOL canScrollHorizontal =
-                (scv.contentSize.width + debugInset.left + debugInset.right) > CGRectGetWidth(scv.bounds);
-                [_boDebugCaptureCandidates addObject:@{
-                    @"scrollView": scv,
-                    @"responderDepth": @(boDebugResponderDepth),
-                    @"hierarchy": @(hierarchy),
-                    @"enabled": @YES,
-                    @"canCapture": @(scvalid),
-                    @"vertical": @(canScrollVertical),
-                    @"horizontal": @(canScrollHorizontal),
-                    @"initialPriority": @(priority)
-                }];
-            }
-#endif
             
             if (scdic) {
                 [scdic setObject:@(priority) forKey:@"priority"];
@@ -775,10 +692,6 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
             && [resp isKindOfClass:[UIView class]]) {
             thewebview = (id)resp;
         }
-
-#if DEBUG
-        boDebugResponderDepth += 1;
-#endif
         
         resp = resp.nextResponder;
     }
@@ -813,132 +726,9 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     return selsc;
 }
 
-#if DEBUG
-- (void)__bo_debugLogCaptureForTouches:(NSSet<UITouch *> *)touches
-                           touchedView:(UIView *)view
-                               webView:(UIView *)webView {
-    UITouch *touch = touches.anyObject;
-    CGPoint location = touch ? [touch locationInView:self] : CGPointZero;
-    BODS_DEBUG_LOG(@"[Touch#%lu][Begin] location=%@ touchedView=%@ webView=%@ candidateCount=%lu",
-                   (unsigned long)_boDebugTouchSequence,
-                   NSStringFromCGPoint(location),
-                   BODragScrollDebugViewDescription(view),
-                   BODragScrollDebugViewDescription(webView),
-                   (unsigned long)_boDebugCaptureCandidates.count);
-
-    __block BOOL currentWasFoundInResponderChain = NO;
-    [_boDebugCaptureCandidates enumerateObjectsUsingBlock:
-     ^(NSDictionary *candidate, NSUInteger idx, BOOL *stop) {
-        UIScrollView *scrollView = candidate[@"scrollView"];
-        BOOL selected = scrollView == self->_currentScrollView;
-        currentWasFoundInResponderChain = currentWasFoundInResponderChain || selected;
-
-        NSInteger initialPriority = [candidate[@"initialPriority"] integerValue];
-        NSInteger finalPriority = initialPriority;
-        NSNumber *adjustedPriority =
-        [self->_innerSVBehaviorInfo objectForKey:[NSString stringWithFormat:@"%p", scrollView]];
-        if (!selected && [adjustedPriority isKindOfClass:[NSNumber class]]) {
-            finalPriority = adjustedPriority.integerValue;
-        }
-        NSString *finalPriorityDescription = selected
-        ? @"captured-current(priority only applies to other scroll views)"
-        : BODragScrollDebugPriorityDescription(finalPriority);
-
-        NSNumber *hierarchy = candidate[@"hierarchy"];
-        NSString *hierarchyText = hierarchy.integerValue == NSNotFound ? @"disabled" : hierarchy.stringValue;
-        BODS_DEBUG_LOG(@"[Touch#%lu][CaptureCandidate#%lu] responderDepth=%@ hierarchy=%@ enabled=%@ canCapture=%@ vertical=%@ horizontal=%@ selectedAsCurrent=%@ initialPriority=%@ finalPriority=%@ scrollView=%@",
-                       (unsigned long)self->_boDebugTouchSequence,
-                       (unsigned long)idx,
-                       candidate[@"responderDepth"],
-                       hierarchyText,
-                       [candidate[@"enabled"] boolValue] ? @"YES" : @"NO",
-                       [candidate[@"canCapture"] boolValue] ? @"YES" : @"NO",
-                       [candidate[@"vertical"] boolValue] ? @"YES" : @"NO",
-                       [candidate[@"horizontal"] boolValue] ? @"YES" : @"NO",
-                       selected ? @"YES" : @"NO",
-                       BODragScrollDebugPriorityDescription(initialPriority),
-                       finalPriorityDescription,
-                       BODragScrollDebugViewDescription(scrollView));
-    }];
-
-    BOOL storedModelAvailable = _innerSVAttInfCount > 0;
-    BOOL modelEstablishedOrRefreshedForTouch = storedModelAvailable && !_boDebugCaptureBypassReason;
-    NSString *mode;
-    if (_boDebugCaptureBypassReason) {
-        mode = _boDebugCaptureBypassReason;
-    } else if (self.innerScrollViewFirst) {
-        mode = @"inner-first(native-inner owns gesture)";
-    } else if (self.innerScrollViewFirstButCanDrag) {
-        mode = @"inner-first-at-boundary(native-inner when it can scroll; panel at boundary)";
-    } else if (modelEstablishedOrRefreshedForTouch) {
-        mode = @"coordinated-scroll";
-    } else if (_currentScrollView) {
-        mode = @"panel-only(captured inner exists but no coordinated model)";
-    } else {
-        mode = @"panel-only(no captured inner)";
-    }
-
-    BODS_DEBUG_LOG(@"[Touch#%lu][CaptureResult] currentScrollView=%@ currentFromThisResponderChain=%@ storedCoordinationModelAvailable=%@ strictRule=(innerSVAttInfCount>0) modelEstablishedOrRefreshedForThisTouch=%@ captureBypassReason=%@ detentHeights=%@ attachSegmentCount=%ld mode=%@",
-                   (unsigned long)_boDebugTouchSequence,
-                   BODragScrollDebugViewDescription(_currentScrollView),
-                   currentWasFoundInResponderChain ? @"YES" : @"NO",
-                   storedModelAvailable ? @"YES" : @"NO",
-                   modelEstablishedOrRefreshedForTouch ? @"YES" : @"NO",
-                   _boDebugCaptureBypassReason ? : @"none",
-                   BODragScrollDebugNumberArrayDescription(self.attachDisplayHAr),
-                   (long)_innerSVAttInfCount,
-                   mode);
-
-    if (storedModelAvailable && !modelEstablishedOrRefreshedForTouch) {
-        BODS_DEBUG_LOG(@"[Touch#%lu][RetainedModelAfterCaptureBypass] reason=%@ storedAttachSegmentCount=%ld modelCameFromPreviousTouch=YES mayStillDriveIfHostPanBegins=YES verifyWithShouldBeginAndOwnerTransition=YES",
-                       (unsigned long)_boDebugTouchSequence,
-                       _boDebugCaptureBypassReason ? : @"current-touch-did-not-refresh-model",
-                       (long)_innerSVAttInfCount);
-    }
-
-    for (NSInteger infoIndex = 0; infoIndex < _innerSVAttInfCount; infoIndex++) {
-        BODragScrollAttachInfo info = _innerSVAttInfAr[infoIndex];
-        UIScrollView *participant = [self __obtainScrollViewWithIdx:info.scrollViewIdx];
-        NSString *role;
-        if (info.scrollViewIdx == -1) {
-            role = @"primary-current";
-        } else if (info.scrollViewIdx > 0) {
-            role = @"captured-ancestor";
-        } else {
-            role = @"none/panel";
-        }
-        NSString *innerActivation = info.dragInner
-        ? [NSString stringWithFormat:@"panelHeight=%.2f", info.displayH]
-        : @"disabled";
-        BODS_DEBUG_LOG(@"[Touch#%lu][ModelSegment#%ld] modelOrigin=%@ scrollViewIdx=%ld role=%@ participant=%@ panelHeight(displayH)=%.2f hostOffset=%.2f→%.2f dragInner=%@ innerOffset=%.2f→%.2f innerScrollActivation=%@",
-                       (unsigned long)_boDebugTouchSequence,
-                       (long)infoIndex,
-                       modelEstablishedOrRefreshedForTouch ? @"current-touch" : @"previous-touch-retained",
-                       (long)info.scrollViewIdx,
-                       role,
-                       BODragScrollDebugViewDescription(participant),
-                       info.displayH,
-                       info.dragSVOffsetY,
-                       info.dragSVOffsetY2,
-                       info.dragInner ? @"YES" : @"NO",
-                       info.innerOffsetA,
-                       info.innerOffsetB,
-                       innerActivation);
-    }
-}
-#endif
-
 - (BOOL)touchesShouldBegin:(NSSet<UITouch *> *)touches
                  withEvent:(UIEvent *)event
              inContentView:(UIView *)view {
-
-#if DEBUG
-    _boDebugTouchSequence += 1;
-    _boDebugCollectingTouchCapture = YES;
-    _boDebugCaptureCandidates = [NSMutableArray array];
-    _boDebugCaptureBypassReason = nil;
-    _boDebugHasOwnerState = NO;
-#endif
     
     if (_lastScrollIsInner &&
         _currentScrollView &&
@@ -953,19 +743,8 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
     NSDictionary *setinfo = [self trySetupCurrentScrollViewWithContentView:view];
     UIView *thewebview = [setinfo objectForKey:@"webView"];
     _didTouchWebView = (nil != thewebview);
-#if DEBUG
-    _boDebugCollectingTouchCapture = NO;
-    [self __bo_debugLogCaptureForTouches:touches touchedView:view webView:thewebview];
-    _boDebugCaptureCandidates = nil;
-#endif
-    BOOL shouldBegin = [super touchesShouldBegin:touches withEvent:event inContentView:view];
-#if DEBUG
-    BODS_DEBUG_LOG(@"[Touch#%lu][touchesShouldBegin] result=%@ semantic=%@",
-                   (unsigned long)_boDebugTouchSequence,
-                   shouldBegin ? @"YES" : @"NO",
-                   shouldBegin ? @"content touch may begin" : @"content touch rejected by UIScrollView");
-#endif
-    return shouldBegin;
+    
+    return [super touchesShouldBegin:touches withEvent:event inContentView:view];
 }
 
 - (NSDictionary *)trySetupCurrentScrollViewWithContentView:(UIView *)view {
@@ -981,11 +760,6 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
         [retdic setObject:thewebview forKey:@"webView"];
         
         if (self.inhibitPanelForWebView) {
-#if DEBUG
-            if (_boDebugCollectingTouchCapture) {
-                _boDebugCaptureBypassReason = @"web-native(panel-inhibited)";
-            }
-#endif
             return retdic;
         }
         
@@ -1001,11 +775,6 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                      judgeInnerSVBehaviorInfo:NO];
         if (nestscar.count >= 2) {
             //设置了ignoreWebMulInnerScroll，且发现web内有多层嵌套了，不捕获，不干涉，返回即可
-#if DEBUG
-            if (_boDebugCollectingTouchCapture) {
-                _boDebugCaptureBypassReason = @"capture-bypassed(multiple-web-scroll-views;UIKit-arbitrates)";
-            }
-#endif
             return retdic;
         }
     }
@@ -1169,9 +938,12 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     if (nil == ws.needsAnimatedToH) {
                         return;
                     }
-                    CGFloat needsath = ws.needsAnimatedToH.floatValue;
+                    CGFloat needsath = ws.needsAnimatedToH.doubleValue;
                     ws.needsAnimatedToH = nil;
-                    if (!sf_uifloat_equal(needsath, ws.currDisplayH)) {
+                    // 保持既有 0.0001pt pending 判定：缓存高度和真实几何都在该范围内
+                    // 才说明首次布局后的待执行动画已经完成，无需再次发起滚动。
+                    if (!sf_uifloat_equal(needsath, ws.currDisplayH) ||
+                        !sf_uifloat_equal(needsath, [ws __currentDisplayHFromGeometry])) {
                         NSDictionary *toanisubinfo = ws.needsAnimatedToHSubInfo;
                         ws.needsAnimatedToHSubInfo = nil;
                         [ws scrollToDisplayH:needsath animated:YES subInfo:toanisubinfo completion:nil];
@@ -1187,7 +959,7 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                              ((nil != self.minDisplayH) ? self.minDisplayH.floatValue : 66));
             if (nil != _needsDisplayH) {
                 //有预置值
-                displayh = _needsDisplayH.floatValue;
+                displayh = _needsDisplayH.doubleValue;
                 _needsDisplayH = nil;
             } else {
                 if (newlayoutembed) {
@@ -1195,7 +967,9 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     displayh = mindh;
                 } else {
                     //size变更布局
-                    displayh = CGRectGetHeight(prebounds) - (CGRectGetMinY(embedrect) - self.contentOffset.y);
+                    displayh = sf_displayHeight(CGRectGetHeight(prebounds),
+                                                self.contentOffset.y,
+                                                embedrect);
                 }
             }
             
@@ -1253,8 +1027,12 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
             
             [self forceReloadCurrInnerScrollView];
             
-            //更新面板展示高度
-            self.currDisplayH = CGRectGetHeight(self.bounds) - (CGRectGetMinY(_embedView.frame) - self.contentOffset.y);
+            // forceReload 可能再次调整联动几何。复读最终几何，但 layout 已明确知道
+            // 本次应保持的 displayh；只有严格的算术尾差才回归该模型值，不再次写 frame。
+            CGFloat actualDisplayH = [self __currentDisplayHFromGeometry];
+            self.currDisplayH = sf_uifloat_equal(actualDisplayH, displayh)
+            ? displayh
+            : actualDisplayH;
         } else {
             [self innerSetting:^{
                 self.bo_contentInset = UIEdgeInsetsZero;
@@ -1454,7 +1232,7 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
         
         _lastInnerSCSize = _currentScrollView.contentSize;
         
-        CGFloat onepxiel = sf_getOnePxiel();
+        CGFloat onepxiel = sf_onePhysicalPixel(self);
         UIEdgeInsets cinset = sf_common_contentInset(_currentScrollView);
         
         CGFloat innertotalsc = 0;
@@ -1533,10 +1311,12 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
             
             CGFloat embedmints = MIN(sfh - maxdh, embedmaxts); //embed视图距离容器顶部的最小距离，可以是负的
             
-#define m_topext (embedcurrts - embedmaxts)
-#define m_topextinner (-innercursc)
-#define m_bottomext (embedmints - embedcurrts)
-#define m_bottomextinner (innercursc - innertotalsc)
+            // bounce 分配只在局部计算中把 0 附近的算术尾差归零；宏仍会随
+            // embedcurrts/innercursc 的转移动态重算，保持原有力量分配顺序。
+#define m_topext sf_modelValueBySnappingToNearestEndpoint((embedcurrts - embedmaxts), 0, 0)
+#define m_topextinner sf_modelValueBySnappingToNearestEndpoint((-innercursc), 0, 0)
+#define m_bottomext sf_modelValueBySnappingToNearestEndpoint((embedmints - embedcurrts), 0, 0)
+#define m_bottomextinner sf_modelValueBySnappingToNearestEndpoint((innercursc - innertotalsc), 0, 0)
             
             CGFloat topbounces = 0;
             CGFloat bottombounces = 0;
@@ -1622,10 +1402,18 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     }
                 }
             }
+
+            // bounce 分配也可能经过多次加减，进入后续段模型前再次消除端点尾差。
+            innercursc = sf_modelValueBySnappingToNearestEndpoint(innercursc,
+                                                                   0,
+                                                                   innertotalsc);
             
             BOOL innerinfocomplete = NO; //初始化内部scrollView滑动是否完成
             
             CGFloat curmaydh = (sfh - embedcurrts); //计算完后当前展示高度
+            // 建模入口只消除已知配置边界附近的算术尾差，避免 frame/offset 往返后的
+            // ULP 残差成为新模型的起点；连续高度及一个物理像素场景判断保持原样。
+            curmaydh = [self __displayHBySnappingToKnownModelBoundary:curmaydh];
             if (scinnerinfoar.count > 0) {
                 //若指定了内部的滑动行为
                 
@@ -1665,6 +1453,12 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     CGFloat infodh = dhval.floatValue;
                     CGFloat infbegin = beginval.floatValue;
                     CGFloat infend = endval.floatValue;
+
+                    // 自定义内部滑动段的 displayH 也是权威模型边界，但不一定存在于
+                    // attachDisplayHAr 中；仅在严格算术尾差内归回该自定义值。
+                    if (sf_uifloat_equal(curmaydh, infodh)) {
+                        curmaydh = infodh;
+                    }
                     
                     //有效判断,不需要判断了吧 浪费资源 由外部保障传入即可
                     //                    if (infend <= infbegin) {
@@ -1698,6 +1492,9 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     
                     if (findwhichidx < 0) {
                         CGFloat curinnerosy = innercursc - cinset.top;
+                        curinnerosy = sf_modelValueBySnappingToNearestEndpoint(curinnerosy,
+                                                                               infbegin,
+                                                                               infend);
                         if (infodh + onepxiel >= curmaydh) {
                             findwhichidx = innerdicidx;
                             
@@ -1787,7 +1584,10 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     if (self.forceBouncesInnerTop) {
                         NSInteger theidx = bo_findIdxInFloatArrayByValue(theattachar, curmaydh, YES, NO);
                         CGFloat thedh = theattachar[theidx].floatValue;
-                        if (thedh == curmaydh
+                        // 这里只判断当前属于哪个离散场景，不对外发布 thedh。
+                        // 一物理像素是场景边界带：带内真实差值也归为同一场景，
+                        // 用于避免边界抖动让 forceBounces 场景反复切换。
+                        if (fabs(thedh - curmaydh) < onepxiel
                             && theidx > 0) {
                             [theattachar removeObjectsInRange:NSMakeRange(0, theidx)];
                         }
@@ -1797,11 +1597,16 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
                     BOOL needssmartadd = NO;
                     if (self.prefDragInnerScroll) {
                         //指定从当前开始滑
-                        NSInteger theidx = bo_findIdxInFloatArrayByValue(theattachar, curmaydh, NO, NO);
-                        //上面已经判断了theattachar.count > 0，bo_findIdxInFloatArrayByValue返回的一定是合法值
+                        NSInteger theidx = bo_findIdxInFloatArrayByValue(theattachar, curmaydh, YES, NO);
                         CGFloat thedh = theattachar[theidx].floatValue;
-                        //当前面板是否在吸附点上
-                        BOOL currinattach = sf_uifloat_equal(curmaydh, thedh);
+                        // 像素带内采用 nearby；带外恢复 floor 语义以构建相邻联动段。
+                        BOOL currinattach = fabs(curmaydh - thedh) < onepxiel;
+                        if (!currinattach
+                            && thedh > curmaydh
+                            && theidx > 0) {
+                            theidx--;
+                            thedh = theattachar[theidx].floatValue;
+                        }
                         if (currinattach) {
                             //默认当前开始滑即可
                             needssmartadd = NO;
@@ -1877,7 +1682,14 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
 
                         CGFloat beginscdh = 0;
                         CGFloat totalinnerscdh = dyembedtosc + scheight;
-                        NSInteger theidx = bo_findIdxInFloatArrayByValue(theattachar, curmaydh, NO, YES);
+                        NSInteger theidx = bo_findIdxInFloatArrayByValue(theattachar, curmaydh, YES, YES);
+                        CGFloat nearbydh = theattachar[theidx].floatValue;
+                        // 像素带内采用 nearby；带外恢复 ceil 语义作为向上搜索起点。
+                        if (fabs(curmaydh - nearbydh) >= onepxiel
+                            && nearbydh < curmaydh
+                            && theidx + 1 < theattachar.count) {
+                            theidx++;
+                        }
                         CGFloat minshowrate = 0.7; //滑动内部时，内部至少展示70%（视觉友好），这个数值根据需要再调吧
                         for (NSInteger uidx = theidx; uidx < theattachar.count; uidx++) {
                             CGFloat thedh = theattachar[uidx].floatValue;
@@ -2346,7 +2158,8 @@ static void bo_swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelect
 }
 
 #pragma mark - 监听内部scrollView的contentSize、contentInset、frame的变化
-static void *sf_observe_context = "sf_observe_context";
+// KVO context 是不透明的身份 token，只能比较指针，不能读取其指向的内容。
+static void *sf_observe_context = &sf_observe_context;
 
 - (void)__addObserveForSc:(UIScrollView *)scrollView {
     if (!scrollView) {
@@ -2412,7 +2225,7 @@ static void *sf_observe_context = "sf_observe_context";
 #endif
     }
     
-    if (0 == memcmp(context, sf_observe_context, strlen(sf_observe_context))) {
+    if (context == sf_observe_context) {
         if (object == _currentScrollView) {
             if ([keyPath isEqualToString:@"contentSize"] &&
                 CGSizeEqualToSize(_currentScrollView.contentSize, _lastInnerSCSize)) {
@@ -2485,17 +2298,20 @@ static void *sf_observe_context = "sf_observe_context";
 }
 
 - (void)setCurrDisplayH:(CGFloat)currDisplayH {
-    
-    if (!sf_uifloat_equal(_currDisplayH, currDisplayH)) {
+    // 凡进入 setter 的正常/自然滚动路径都逐次保存 model 几何，不再被近似相等
+    // 阈值截断；UIView 动画配置 delayCallDisplayHChangeWhenAnimation 时仍沿用原来的
+    // 延迟更新时机。0.0001pt 仅用于自定义值变化回调去重。
+    if (_currDisplayH != currDisplayH) {
         _currDisplayH = currDisplayH;
-        
-        //有手势拖拽的起点，表示实在拖拽过程中，标记高度发生变化
-        if (nil != _dragBeganDH
-            && !_dragDHHasChange) {
-            _dragDHHasChange = YES;
+        // 与通知基线比较而不是上一帧 model 值：多个不足 0.0001pt 的小变化
+        // 可以累计到一次回调，不会永久丢失微小的连续变化。
+        BOOL shouldNotify = !sf_uifloat_equal(_displayHChangeBaseline, currDisplayH);
+        if (shouldNotify) {
+            _displayHChangeBaseline = currDisplayH;
         }
-        
-        if (self.dragScrollDelegate &&
+
+        if (shouldNotify &&
+            self.dragScrollDelegate &&
             [self.dragScrollDelegate respondsToSelector:@selector(dragScrollView:displayHDidChange:)]) {
             [self.dragScrollDelegate dragScrollView:self displayHDidChange:_currDisplayH];
         }
@@ -2504,6 +2320,29 @@ static void *sf_observe_context = "sf_observe_context";
 
 - (BOOL)animationSetting {
     return _isScrollAnimating;
+}
+
+- (CGFloat)__minimumModelDisplayH {
+    // 与 layoutSubviews 建模规则保持一致，供边界截断后返回模型标准目标值。
+    // 不能用截断后的 offset 再加 bounds.height 反推，否则会重新产生浮点尾差。
+    if (self.attachDisplayHAr.count > 0) {
+        return self.attachDisplayHAr.firstObject.floatValue;
+    }
+    return self.minDisplayH ? self.minDisplayH.floatValue : 66;
+}
+
+- (CGFloat)__maximumModelDisplayH {
+    // 只在已完成布局、禁止底部 bounce 且 scrollTo 超过布局上限时使用。
+    // 这不是“最大不超过 panel 高度”的限制：存在吸附点时取最后一点，吸附点
+    // 可以高于 panel 自身高度；layoutSubviews 会通过正的 contentInset.bottom
+    // 保留 panel 底部越过 viewport 后露出的空白区域。没有吸附点时才沿用原
+    // maxdh 规则，取 minimumDisplayH 与已布局 panel 高度的较大值。
+    // 允许底部 bounce 时 scrollTo 不经过这项截断。
+    CGFloat minimumDisplayH = [self __minimumModelDisplayH];
+    if (self.attachDisplayHAr.count > 0) {
+        return MAX(minimumDisplayH, self.attachDisplayHAr.lastObject.floatValue);
+    }
+    return MAX(minimumDisplayH, CGRectGetHeight(self.embedView.frame));
 }
 
 - (NSNumber *)willLayoutToDisplayH {
@@ -2519,10 +2358,10 @@ static void *sf_observe_context = "sf_observe_context";
     if (_innerSVAttInfCount > 0) {
         CGPoint offset = _currentScrollView.contentOffset;
         NSNumber *innershouldosy = nil;
-        CGFloat onepxiel = sf_getOnePxiel();
+        CGFloat onepxiel = sf_onePhysicalPixel(self);
         for (NSInteger infoidx = 0; infoidx < _innerSVAttInfCount; infoidx++) {
             BODragScrollAttachInfo innerscinfo = _innerSVAttInfAr[infoidx];
-            if (dh < innerscinfo.displayH - sf_getOnePxiel()) {
+            if (dh < innerscinfo.displayH - onepxiel) {
                 //在最底部
                 if (!sf_uifloat_equal(offset.y, innerscinfo.innerOffsetA)) {
                     innershouldosy = @(innerscinfo.innerOffsetA);
@@ -2567,8 +2406,11 @@ static void *sf_observe_context = "sf_observe_context";
                    animated:(BOOL)animated
                     subInfo:(NSDictionary *)subInfo
                  completion:(void (^ __nullable)(void))completion {
-    if (displayH == self.currDisplayH) {
-        //相同可以直接返回
+    if (displayH == self.currDisplayH &&
+        displayH == [self __currentDisplayHFromGeometry]) {
+        // 缓存值和真实几何都精确到位才直接返回：第二个条件防止尾差被旧缓存
+        // 掩盖；第一个条件保持 delayCallDisplayHChangeWhenAnimation 下的旧行为。
+        // 此处不能强写 currDisplayH，否则会绕过该属性原有的延迟更新语义。
         if (completion) {
             completion();
         }
@@ -2625,10 +2467,17 @@ static void *sf_observe_context = "sf_observe_context";
             //如果滑动改的位置超过最大/最小值，且设置了不允许bounces，那么并不能滑动指定位置。这里做修正
             if (os.y < minosy && !self.allowBouncesCardTop) {
                 os.y = minosy;
+                // 使用模型最小值，避免 (displayH - sfh) + sfh 产生尾差。
+                validdisplayH = [self __minimumModelDisplayH];
             } else if (os.y > maxosy && !self.allowBouncesCardBottom) {
                 os.y = maxosy;
+                // 同上，边界截断后的终点由布局模型直接给出。
+                validdisplayH = [self __maximumModelDisplayH];
+            } else {
+                //未被边界截断时保留调用方给出的目标，不做无意义的减后再加。
+                validdisplayH = displayH;
             }
-            validdisplayH = os.y + sfh;
+            CGFloat finalDisplayH = validdisplayH;
             
             void (^doblock)(void) = ^{
                 if (animated) {
@@ -2675,7 +2524,13 @@ static void *sf_observe_context = "sf_observe_context";
                                 }
                             };
                         } else {
-                            //不需要变化，直接回调
+                            // offset 已经完全相同，不会产生异步滚动结束时机。复读真实
+                            // 几何，只在它与本次明确目标相差严格小于 0.0001pt 时发布
+                            // 目标值；不再尝试通过 frame/center 往返追逐 ULP 尾差。
+                            CGFloat actualDisplayH = [self __currentDisplayHFromGeometry];
+                            self.currDisplayH = sf_uifloat_equal(actualDisplayH, finalDisplayH)
+                            ? finalDisplayH
+                            : actualDisplayH;
                             if (completion) {
                                 completion();
                             }
@@ -2755,7 +2610,9 @@ static void *sf_observe_context = "sf_observe_context";
     //排序
     _attachDisplayHAr =\
     [attachDisplayHAr sortedArrayUsingComparator:^NSComparisonResult(NSNumber *  _Nonnull obj1, NSNumber *  _Nonnull obj2) {
-        return obj1.floatValue - obj2.floatValue;
+        // comparator 必须返回明确的三态结果；直接返回浮点差会隐式转换为整数，
+        // 使差值不足 1pt 的两个吸附点被错误地当成 NSOrderedSame。
+        return [obj1 compare:obj2];
     }];
     
     //attachDisplayHAr改变后，可展示的最小、最大高度可能会变化，contentinse有可能需要变化
@@ -2922,7 +2779,7 @@ static void *sf_observe_context = "sf_observe_context";
     
     if (self.delayCallDisplayHChangeWhenAnimation) {
         [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-            CGFloat newdh = CGRectGetHeight(self.bounds) - (CGRectGetMinY(self.embedView.frame) - self.contentOffset.y);
+            CGFloat newdh = [self __currentDisplayHFromGeometry];
             if (self.needsAnimationWhenDelayCall) {
                 [UIView animateWithDuration:dur
                                       delay:0
@@ -2949,11 +2806,11 @@ static void *sf_observe_context = "sf_observe_context";
         return;
     }
     BOOL isinnersc = NO;
-#if DEBUG
-    // Assigned by the same branch that selects `isinnersc`; never infer the owner again from
-    // overlapping one-pixel model ranges in the logger.
-    UIScrollView *boDebugActiveParticipant = nil;
-#endif
+    // 当前分支若数学上要求展示高度固定，则同时从模型解析 frame 和 displayH。
+    // 这里只保存本次回调的局部结果，不形成第二套持久高度状态。
+    BOOL hasKnownDisplayH = NO;
+    CGFloat knownDisplayH = 0;
+    CGFloat viewportHeight = CGRectGetHeight(self.bounds);
     CGFloat innertotalsc = _totalScrollInnerOSy;
     BOOL triggerinner = NO;
     //暂时不用这个属性，后续有需求可能会用
@@ -2972,7 +2829,7 @@ static void *sf_observe_context = "sf_observe_context";
             }
         }
         CGFloat minosy = -self.contentInset.top;
-        CGFloat maxosy = MAX(self.contentSize.height + self.contentInset.bottom - CGRectGetHeight(self.bounds),
+        CGFloat maxosy = MAX(self.contentSize.height + self.contentInset.bottom - viewportHeight,
                              -self.contentInset.top);
         
         CGRect embedf = _embedView.frame;
@@ -2988,14 +2845,17 @@ static void *sf_observe_context = "sf_observe_context";
                 innershouldosy = innerminosy;
                 embedf.origin.y = 0;
             } else {
+                // 当前已生效模型的顶部边界；严格尾差内再归回配置值，可兼容
+                // forceBouncesInnerTop 临时收窄后的 attach 范围。
+                CGFloat minimumBoundaryDisplayH =
+                [self __displayHBySnappingToKnownModelBoundary:(viewportHeight + minosy)];
                 if (_currentScrollView.bounces) {
                     innershouldosy = innerminosy - topext;
+                    hasKnownDisplayH = YES;
+                    knownDisplayH = minimumBoundaryDisplayH;
                     embedf.origin.y = -topext;
                     
                     isinnersc = YES;
-#if DEBUG
-                    boDebugActiveParticipant = _currentScrollView;
-#endif
                 } else {
                     //内部不支持bounces
                     CGPoint co = self.contentOffset;
@@ -3005,6 +2865,8 @@ static void *sf_observe_context = "sf_observe_context";
                     [self innerSetting:^{
                         self.bo_contentOffset = co;
                     }];
+                    hasKnownDisplayH = YES;
+                    knownDisplayH = minimumBoundaryDisplayH;
                     isinnersc = NO;
                 }
             }
@@ -3020,8 +2882,11 @@ static void *sf_observe_context = "sf_observe_context";
             for (NSInteger infoidx = 0; infoidx < _innerSVAttInfCount; infoidx++) {
                 BODragScrollAttachInfo innerscinfo = _innerSVAttInfAr[infoidx];
                 UIScrollView *theinfosv = [self __obtainScrollViewWithIdx:innerscinfo.scrollViewIdx];
-                if (offsety + sf_getOnePxiel() >= innerscinfo.dragSVOffsetY) {
-                    CGFloat infomaxsc = innerscinfo.innerOffsetB - innerscinfo.innerOffsetA;
+                // 原模型允许在段起点前一个物理像素提前进入边界判断，因此下面的
+                // segmentOffset 可能为负；不能按像素带 clamp，避免改变原有交接手感。
+                // 仅在真正计算时消除严格小于 0.0001pt 的端点算术尾差。
+                if (offsety + sf_onePhysicalPixel(self) >= innerscinfo.dragSVOffsetY) {
+                    CGFloat segmentLength = innerscinfo.innerOffsetB - innerscinfo.innerOffsetA;
                     if (infoidx + 1 < _innerSVAttInfCount) {
                         //有下一个
                         BODragScrollAttachInfo nextinfo = _innerSVAttInfAr[infoidx + 1];
@@ -3038,7 +2903,7 @@ static void *sf_observe_context = "sf_observe_context";
                                     theinfosv.bo_contentOffset = theos;
                                 }
                             }
-                            cursclength += infomaxsc;
+                            cursclength += segmentLength;
                             continue;
                         }
                     } else {
@@ -3046,10 +2911,18 @@ static void *sf_observe_context = "sf_observe_context";
                         //使用当前
                     }
                     
-                    CGFloat exty = offsety - innerscinfo.dragSVOffsetY;
-                    if (exty > infomaxsc) {
+                    // outer offset 相对当前内部联动段起点的实际位移，单位是 pt，
+                    // 不是 0...1 比例。负值来自上方刻意保留的一像素边界带；段尾
+                    // 也继续走原分支，不额外 clamp 或改变越界行为。
+                    CGFloat segmentOffset = offsety - innerscinfo.dragSVOffsetY;
+                    // 系统真实 offset 保持不变；仅让本次模型计算把端点附近的
+                    // 0.0001pt 内算术尾差视为精确的 0/segmentLength。
+                    segmentOffset = sf_modelValueBySnappingToNearestEndpoint(segmentOffset,
+                                                                              0,
+                                                                              segmentLength);
+                    if (segmentOffset > segmentLength) {
                         //超过了
-                        cursclength += infomaxsc;
+                        cursclength += segmentLength;
                         if (theinfosv == _currentScrollView) {
                             innershouldosy = innerscinfo.innerOffsetB;
                         } else {
@@ -3062,25 +2935,29 @@ static void *sf_observe_context = "sf_observe_context";
                         isinnersc = NO;
                     } else {
                         //在该滑动内部的区间
-                        cursclength += exty;
+                        cursclength += segmentOffset;
                         if (theinfosv == _currentScrollView) {
-                            innershouldosy = innerscinfo.innerOffsetA + exty;
+                            innershouldosy = innerscinfo.innerOffsetA + segmentOffset;
                         } else {
                             CGPoint theos = theinfosv.contentOffset;
-                            theos.y = innerscinfo.innerOffsetA + exty;
+                            theos.y = innerscinfo.innerOffsetA + segmentOffset;
                             if (theinfosv.scrollEnabled) {
                                 theinfosv.bo_contentOffset = theos;
                             }
                         }
-                        //exty是0的话，标识已经到外部了
-                        isinnersc = (exty > 0);
-#if DEBUG
-                        if (isinnersc) {
-                            boDebugActiveParticipant = theinfosv;
+                        // segmentOffset == 0 仍是 outer 到 inner 的边界；只有大于 0
+                        // 才标记正在滑内部。固定高度则从段起点（含 0）开始生效。
+                        isinnersc = (segmentOffset > 0);
+                        if (segmentOffset >= 0 && isfinite(innerscinfo.displayH)) {
+                            hasKnownDisplayH = YES;
+                            knownDisplayH = innerscinfo.displayH;
                         }
-#endif
                     }
-                    embedf.origin.y = cursclength;
+                    // 非内部联动段仍沿用原累计距离；固定高度段则从当前真实 offset
+                    // 和模型高度绝对解析 frame，不使用上一帧 frame 或累计残差。
+                    embedf.origin.y = hasKnownDisplayH
+                    ? viewportHeight + offsety - knownDisplayH
+                    : cursclength;
                     findtheinfo = YES;
                     break;
                 }
@@ -3114,14 +2991,15 @@ static void *sf_observe_context = "sf_observe_context";
                 innershouldosy = innermaxosy;
             } else {
                 //bounces内部
+                CGFloat maximumBoundaryDisplayH =
+                [self __displayHBySnappingToKnownModelBoundary:(viewportHeight + maxosy - innertotalsc)];
                 if (_currentScrollView.bounces) {
+                    hasKnownDisplayH = YES;
+                    knownDisplayH = maximumBoundaryDisplayH;
                     embedf.origin.y = innertotalsc + bottomext;
                     innershouldosy = innermaxosy + bottomext;
                     
                     isinnersc = YES;
-#if DEBUG
-                    boDebugActiveParticipant = _currentScrollView;
-#endif
                 } else {
                     //内部不支持bounces
                     CGPoint co = self.contentOffset;
@@ -3133,6 +3011,8 @@ static void *sf_observe_context = "sf_observe_context";
                     [self innerSetting:^{
                         self.bo_contentOffset = co;
                     }];
+                    hasKnownDisplayH = YES;
+                    knownDisplayH = maximumBoundaryDisplayH;
                 }
             }
         }
@@ -3144,7 +3024,8 @@ static void *sf_observe_context = "sf_observe_context";
         CGPoint inneroffset = _currentScrollView.contentOffset;
         inneroffset.y = innershouldosy;
         [self innerSetting:^{
-            //要先设EmbedViewFrame再setCurrentSVContentOffset，否则setCurrentSVContentOffset可能引起系统的重新布局矫正CurrentSV的ContentOffset
+            // 保持原实现要求的顺序：先写 panel frame，最后写内部 scroll offset；
+            // 两步处于同一个 innerSetting 保护范围，避免中间状态触发自身滚动逻辑。
             [self setEmbedViewFrame:embedf];
             if (0 == self->_missAttachAndNeedsReload) {
                 [self setCurrentSVContentOffset:inneroffset];
@@ -3159,16 +3040,22 @@ static void *sf_observe_context = "sf_observe_context";
         CGFloat coy = self.contentOffset.y;
         CGFloat minosy = -self.contentInset.top;
         CGFloat maxosy =\
-        MAX(minosy, self.contentSize.height + self.contentInset.bottom - CGRectGetHeight(self.bounds));
+        MAX(minosy, self.contentSize.height + self.contentInset.bottom - viewportHeight);
         CGRect embedf = _embedView.frame;
         if (coy > maxosy && !self.allowBouncesCardBottom) {
             isbounces = YES;
+            hasKnownDisplayH = YES;
+            knownDisplayH =
+            [self __displayHBySnappingToKnownModelBoundary:(viewportHeight + maxosy)];
             embedf.origin.y = coy - maxosy;
             [self innerSetting:^{
                 [self setEmbedViewFrame:embedf];
             }];
         } else if (coy < minosy && !self.allowBouncesCardTop) {
             isbounces = YES;
+            hasKnownDisplayH = YES;
+            knownDisplayH =
+            [self __displayHBySnappingToKnownModelBoundary:(viewportHeight + minosy)];
             embedf.origin.y = coy - minosy;
             [self innerSetting:^{
                 [self setEmbedViewFrame:embedf];
@@ -3189,45 +3076,23 @@ static void *sf_observe_context = "sf_observe_context";
         self.autoShowInnerIndictor) {
         for (UIView *subv in _currentScrollView.subviews) {
             
+            // 这里不是普通浮点相等，而是对 UIKit 私有 indicator 尺寸的启发式识别；
+            // 保留独立的 0.01pt 容差，避免系统布局细节变化导致 indicator 识别失效。
             if ([subv isKindOfClass:[UIImageView class]] &&
-                sf_uifloat_equal(subv.frame.size.width, 2.5)) {
+                fabs(subv.frame.size.width - 2.5) < 0.01) {
                 subv.alpha = 1;
                 subv.tag = sf_indictor_tag;
             }
         }
     }
     
-    CGFloat newdh = CGRectGetHeight(self.bounds) - (CGRectGetMinY(_embedView.frame) - self.contentOffset.y);
-
-#if DEBUG
-    if (_boDebugTouchSequence > 0 &&
-        (!_boDebugHasOwnerState || _boDebugLastOwnerWasInner != isinnersc)) {
-        NSString *previousOwner = !_boDebugHasOwnerState
-        ? @"none"
-        : (_boDebugLastOwnerWasInner ? @"inner" : @"panel");
-        NSString *newOwner = isinnersc ? @"inner" : @"panel";
-        NSString *motionKind;
-        if (self.bods_isTracking || self.isDragging) {
-            motionKind = @"touch";
-        } else if (self.bods_isDecelerating) {
-            motionKind = @"deceleration";
-        } else if (self.isScrollAnimating) {
-            motionKind = @"programmatic-animation";
-        } else {
-            motionKind = @"programmatic-or-layout";
-        }
-        BODS_DEBUG_LOG(@"[Touch#%lu][OwnerTransition] %@→%@ displayHeight=%.2f hostOffsetY=%.2f motionKind=%@ activeParticipant=%@",
-                       (unsigned long)_boDebugTouchSequence,
-                       previousOwner,
-                       newOwner,
-                       newdh,
-                       self.contentOffset.y,
-                       motionKind,
-                       BODragScrollDebugViewDescription(boDebugActiveParticipant));
-        _boDebugHasOwnerState = YES;
-        _boDebugLastOwnerWasInner = isinnersc;
-    }
-#endif
+    CGFloat actualDisplayH = [self __currentDisplayHFromGeometry];
+    // 只有当前分支已经证明高度数学上固定，并且真实几何只差严格的算术尾差时，
+    // 才发布模型中的精确值。差异更大时保留真实值，避免掩盖布局或模型错误。
+    CGFloat newdh = (hasKnownDisplayH &&
+                     sf_uifloat_equal(actualDisplayH, knownDisplayH))
+    ? knownDisplayH
+    : actualDisplayH;
     
     //滑动外部时使用DecelerationRateFast
     if (scrollView.bods_isTracking) {
@@ -3325,10 +3190,13 @@ static void *sf_observe_context = "sf_observe_context";
         if (idxb < _innerSVAttInfCount) {
             binfo = _innerSVAttInfAr[idxb];
             if (nil != aYESbNO && aYESbNO.boolValue) {
-                if (binfo.displayH < (adh - sf_getOnePxiel())) {
+                // 这里只把高度位于同一物理像素边界带的外部吸附点与内部联动段
+                // 合并成同一场景；带内可包含真实 subpixel 差值，但不会把吸附点
+                // 数值写成当前公开高度。
+                if (binfo.displayH < (adh - sf_onePhysicalPixel(self))) {
                     aYESbNO = @(NO);
                     idxb++;
-                } else if (binfo.displayH > (adh + sf_getOnePxiel())) {
+                } else if (binfo.displayH > (adh + sf_onePhysicalPixel(self))) {
                     idxa++;
                 } else {
                     //两个高度相等，使用b的信息，因为要把里面滑动内部的信息带上
@@ -3427,15 +3295,21 @@ static void *sf_observe_context = "sf_observe_context";
 
 /*
  根据联动模型将BODragScrollView的offset.y投影为面板展示高度。
- 无吸附点时系统的targetContentOffset需要原样保留，但内部滑动消耗的距离
- 不能重复计入面板展示高度。
+ 当本次目标没有被组件改写成吸附目标时，系统/外部给出的 targetContentOffset
+ 需要原样保留，但内部滑动消耗的距离不能重复计入面板展示高度。
  */
 - (CGFloat)__displayHForDragOffsetY:(CGFloat)dragOffsetY {
     CGFloat consumedInnerDistance = 0;
     for (NSInteger idx = 0; idx < _innerSVAttInfCount; idx++) {
         BODragScrollAttachInfo info = _innerSVAttInfAr[idx];
         CGFloat segmentLength = MAX(info.innerOffsetB - info.innerOffsetA, 0);
-        CGFloat segmentProgress = MIN(MAX(dragOffsetY - info.dragSVOffsetY, 0), segmentLength);
+        CGFloat segmentOffset = dragOffsetY - info.dragSVOffsetY;
+        if (segmentOffset >= 0 && segmentOffset <= segmentLength) {
+            // 该方法只预测 willTargetToH；内部联动段内的高度是模型离散值，
+            // 直接返回它，避免用 offset 减去已消费距离重新构造出浮点尾差。
+            return info.displayH;
+        }
+        CGFloat segmentProgress = MIN(MAX(segmentOffset, 0), segmentLength);
         consumedInnerDistance += segmentProgress;
     }
     return CGRectGetHeight(self.bounds) + dragOffsetY - consumedInnerDistance;
@@ -3467,7 +3341,7 @@ static void *sf_observe_context = "sf_observe_context";
     }
     
     NSInteger scrolltype = 0;
-    CGFloat onepxiel = sf_getOnePxiel();
+    CGFloat onepxiel = sf_onePhysicalPixel(self);
     
     CGPoint targetos = *targetContentOffset;
     CGFloat toy = targetos.y;
@@ -3723,8 +3597,9 @@ static void *sf_observe_context = "sf_observe_context";
             toy = (tarloc < 0 ? tarinfo.dragSVOffsetY : tarinfo.dragSVOffsetY2);
         }
         
-        //由bounces状态弹到置顶、置底状态
-        if ((curosy < -self.contentInset.top && sf_uifloat_equal(toy, -self.contentInset.top))
+        // 由 bounces 状态弹回边界属于场景判定：顶部分支把系统目标的一物理像素
+        // 作为边界带；底部分支保持原实现，仅依据当前 offset 已越过底边界。
+        if ((curosy < -self.contentInset.top && fabs(toy + self.contentInset.top) < onepxiel)
             ||
             (curosy >
              MAX(self.contentSize.height + self.contentInset.bottom - CGRectGetHeight(self.bounds),
@@ -3750,8 +3625,9 @@ static void *sf_observe_context = "sf_observe_context";
                                                   withVelocity:velocity
                                            targetContentOffset:&inostarget];
         //目前暂定：本身落点在内部时，才会受内部targetContentOffset修改的影响，若本身落点不在内部，则不被内部的设置干扰
+        // currinnertarget 刚直接写入 inostarget.y；delegate 返回后任何差异都是其显式改写，不做阈值过滤。
         if ((11 == scrolltype || 21 == scrolltype) &&
-            !sf_uifloat_equal(currinnertarget, inostarget.y)) {
+            currinnertarget != inostarget.y) {
             //数值被修改了，校验合法性
             CGFloat outtargety = inostarget.y  + innerinsets.top + _minScrollInnerOSy;
             NSInteger outtarloc = -1;
@@ -3824,7 +3700,10 @@ static void *sf_observe_context = "sf_observe_context";
         
     } else if (UIAccessibilityScrollDirectionUp == direction) {
         if (self.attachDisplayHAr.count > 0) {
-            if (self.currDisplayH == self.attachDisplayHAr.lastObject.floatValue) {
+            // 这里判断的是 accessibility 应由面板还是内部 scrollView 响应的场景，
+            // 严格小于一个物理像素的边界带只用于防止浮点尾差破坏场景归属。
+            CGFloat highestAttachDisplayH = self.attachDisplayHAr.lastObject.floatValue;
+            if (fabs(self.currDisplayH - highestAttachDisplayH) < sf_onePhysicalPixel(self)) {
                 //若代理未显示告知_currentScrollView不处理，对_currentScrollView进行只能判定
                 if (nil == dacontrol) {
                     if (!_currentScrollView) {
@@ -3875,6 +3754,8 @@ static void *sf_observe_context = "sf_observe_context";
                          withVelocity:velocity
                   targetContentOffset:targetContentOffset
                            attachInfo:&theinfo];
+    // 保存组件及内部 scroll delegate 算出的目标，用于识别外部 delegate 是否改写。
+    CGFloat componentTargetOffsetY = (*targetContentOffset).y;
     
     if (self.dragScrollDelegate && [self.dragScrollDelegate respondsToSelector:@selector(scrollViewWillEndDragging:withVelocity:targetContentOffset:)]) {
         [self.dragScrollDelegate scrollViewWillEndDragging:scrollView
@@ -3883,8 +3764,16 @@ static void *sf_observe_context = "sf_observe_context";
     }
     
     CGFloat dragoutdy = (*targetContentOffset).y;
+    // 只有组件选出的、未被外部 delegate 改写的精确段端点，才能直接采用
+    // 模型 displayH；自定义目标继续按真实 target offset 投影。
+    BOOL isKnownAttachTarget =
+    (0 != scrolltype &&
+     dragoutdy == componentTargetOffsetY &&
+     (dragoutdy == theinfo.dragSVOffsetY || dragoutdy == theinfo.dragSVOffsetY2));
     CGFloat newdh;
-    if (0 != scrolltype && _innerSVAttInfCount > 0) {
+    if (isKnownAttachTarget) {
+        newdh = theinfo.displayH;
+    } else if (0 != scrolltype && _innerSVAttInfCount > 0) {
         if (dragoutdy < theinfo.dragSVOffsetY) {
             newdh = theinfo.displayH - theinfo.dragSVOffsetY + dragoutdy;
         } else if (dragoutdy <= theinfo.dragSVOffsetY2) {
@@ -3896,30 +3785,23 @@ static void *sf_observe_context = "sf_observe_context";
         newdh = [self __displayHForDragOffsetY:dragoutdy];
     }
     
-    BOOL willdecelerate =\
-    (!sf_uifloat_equal((*targetContentOffset).y, self.contentOffset.y));
+    // targetContentOffset 与当前 offset 都是本次系统回调的直接值；任何差异都表示
+    // 系统存在实际目标移动，不能用近似阈值改变动画接管与后续回调路径。
+    BOOL targetWillMove = ((*targetContentOffset).y != self.contentOffset.y);
     
-    NSString *reason = [NSString stringWithFormat:@"willEndDragging%@", willdecelerate ? @"-willdecelerate" : @""];
-    //整个drag过程中，displayHeight没发生过变化，则不用触发TargetTo
-    
-    //中间没有变化，且结果也不会变化，不需要发target变化的回调
-    BOOL ignoretargetto = !_dragDHHasChange && sf_uifloat_equal(newdh, _dragBeganDH.floatValue);
-    //恢复拖拽相关标记位
-    _dragBeganDH = nil;
-    _dragDHHasChange = NO;
-    
-    if (!ignoretargetto) {
-        if (self.dragScrollDelegate &&
-            [self.dragScrollDelegate respondsToSelector:@selector(dragScrollView:willTargetToH:reason:)]) {
-            [self.dragScrollDelegate dragScrollView:self
-                                      willTargetToH:newdh
-                                             reason:reason];
-        }
-        
-        _waitDidTargetTo = YES;
+    NSString *reason = [NSString stringWithFormat:@"willEndDragging%@", targetWillMove ? @"-willdecelerate" : @""];
+
+    // willTargetToH 表示本次手势结束产生了一次滑动意图，不是高度变化通知。
+    // 即使目标高度与当前高度相同，也应按系统 willEndDragging 事件如实回调。
+    if (self.dragScrollDelegate &&
+        [self.dragScrollDelegate respondsToSelector:@selector(dragScrollView:willTargetToH:reason:)]) {
+        [self.dragScrollDelegate dragScrollView:self
+                                  willTargetToH:newdh
+                                         reason:reason];
     }
+    _waitDidTargetTo = YES;
     
-    if (22 == scrolltype && willdecelerate) {
+    if (22 == scrolltype && targetWillMove) {
         //外部滑向外部才需要选择动画
         BODragScrollDecelerateStyle anisel = self.defaultDecelerateStyle;
         if (self.dragScrollDelegate &&
@@ -4058,12 +3940,6 @@ static void *sf_observe_context = "sf_observe_context";
 
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
     _scrollBeganLoc = @([scrollView.panGestureRecognizer locationInView:scrollView.window]);
-    /*
-     拖拽起始时的展示高度
-     */
-    _dragBeganDH = @(_currDisplayH);
-    _dragDHHasChange = NO;
-    
     if (_needsFixDisplayHWhenTouchEnd) {
         //开始响应手势滑动了，自会在滑动结束后重置位置，不需要_dsTapGes的抬起修正了
         _needsFixDisplayHWhenTouchEnd = NO;
@@ -4155,6 +4031,11 @@ static void *sf_observe_context = "sf_observe_context";
     if (innertotalsc <= 0) {
         return NO;
     }
+
+    // 手势优先级只使用规范后的局部进度；不改写内部 scrollView 的真实 offset。
+    innercursc = sf_modelValueBySnappingToNearestEndpoint(innercursc,
+                                                           0,
+                                                           innertotalsc);
     
     if (innercursc < 0
         || innercursc > innertotalsc) {
@@ -4177,14 +4058,9 @@ static void *sf_observe_context = "sf_observe_context";
 
 #pragma mark - gesture
 
-
-/*
- YES:  对方优先
- NO:  己方优先
- */
 //不实现该方法，默认NO即可
 //当gestureRecognizer遇到otherGestureRecognizer，是否希望将gestureRecognizer失效
-- (BOOL)__bo_resultForGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
 shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         return NO;
@@ -4252,36 +4128,8 @@ shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecog
     }
 }
 
-/*
- YES:  对方优先
- NO:  己方优先
- */
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    BOOL result = [self __bo_resultForGestureRecognizer:gestureRecognizer
-             shouldRequireFailureOfGestureRecognizer:otherGestureRecognizer];
-#if DEBUG
-    UIScrollView *otherScrollView = BODragScrollDebugScrollViewForPanGesture(otherGestureRecognizer);
-    if (gestureRecognizer == self.panGestureRecognizer &&
-        otherScrollView &&
-        otherScrollView != self) {
-        NSString *semantic = result
-        ? @"other-first: 当前pan等待对方pan失败"
-        : @"no-other-first-dependency: 未建立对方优先依赖（不能据此推断当前优先）";
-        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldRequireFailureOf] result=%@ semantic=%@ otherIsCurrentCaptured=%@ storedCapturePriority=%@ other=%@",
-                       (unsigned long)_boDebugTouchSequence,
-                       result ? @"YES" : @"NO",
-                       semantic,
-                       otherScrollView == _currentScrollView ? @"YES" : @"NO",
-                       BODragScrollDebugPriorityDescription([self __priorityBehaviorForInnerSV:otherScrollView]),
-                       BODragScrollDebugViewDescription(otherScrollView));
-    }
-#endif
-    return result;
-}
-
 //当gestureRecognizer遇到otherGestureRecognizer，是否希望将otherGestureRecognizer失效
-- (BOOL)__bo_resultForGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
 shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         return NO;
@@ -4355,35 +4203,6 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
     }
 }
 
-
-/*
- YES:  几方优先
- NO:  对方
- */
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    BOOL result = [self __bo_resultForGestureRecognizer:gestureRecognizer
-          shouldBeRequiredToFailByGestureRecognizer:otherGestureRecognizer];
-#if DEBUG
-    UIScrollView *otherScrollView = BODragScrollDebugScrollViewForPanGesture(otherGestureRecognizer);
-    if (gestureRecognizer == self.panGestureRecognizer &&
-        otherScrollView &&
-        otherScrollView != self) {
-        NSString *semantic = result
-        ? @"current-first: 对方pan等待当前pan失败"
-        : @"no-current-first-dependency: 未建立当前优先依赖（不能据此推断对方优先）";
-        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldBeRequiredToFailBy] result=%@ semantic=%@ otherIsCurrentCaptured=%@ storedCapturePriority=%@ other=%@",
-                       (unsigned long)_boDebugTouchSequence,
-                       result ? @"YES" : @"NO",
-                       semantic,
-                       otherScrollView == _currentScrollView ? @"YES" : @"NO",
-                       BODragScrollDebugPriorityDescription([self __priorityBehaviorForInnerSV:otherScrollView]),
-                       BODragScrollDebugViewDescription(otherScrollView));
-    }
-#endif
-    return result;
-}
-
 /*
  不实现该方法，则默认与任何手势不共存
  若希望本组件与某些UIPanGestureRecognizer共存，使其不影响本组件的滑动效果:
@@ -4391,7 +4210,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
  2.在上面的shouldBeRequiredToFail做对应处理
  3.再考虑怎么设计才能可配置且通用
  */
-- (BOOL)__bo_resultForGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         return YES;
     } else if (gestureRecognizer.view == self) {
@@ -4488,30 +4307,7 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
     }
 }
 
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    BOOL result = [self __bo_resultForGestureRecognizer:gestureRecognizer
-              shouldRecognizeSimultaneouslyWithGestureRecognizer:otherGestureRecognizer];
-#if DEBUG
-    UIScrollView *otherScrollView = BODragScrollDebugScrollViewForPanGesture(otherGestureRecognizer);
-    if (gestureRecognizer == self.panGestureRecognizer &&
-        otherScrollView &&
-        otherScrollView != self) {
-        NSString *semantic = result
-        ? @"simultaneous: 当前pan与对方pan可同时识别"
-        : @"not-simultaneous: 不同时识别，最终优先级由失败依赖或系统决定";
-        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldRecognizeSimultaneouslyWith] result=%@ semantic=%@ otherIsCurrentCaptured=%@ storedCapturePriority=%@ other=%@",
-                       (unsigned long)_boDebugTouchSequence,
-                       result ? @"YES" : @"NO",
-                       semantic,
-                       otherScrollView == _currentScrollView ? @"YES" : @"NO",
-                       BODragScrollDebugPriorityDescription([self __priorityBehaviorForInnerSV:otherScrollView]),
-                       BODragScrollDebugViewDescription(otherScrollView));
-    }
-#endif
-    return result;
-}
-
-- (BOOL)__bo_resultForGestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
     if (gestureRecognizer == _dsTapGes) {
         if (_lastAniScrollEndTS > 0 &&
             [NSDate date].timeIntervalSince1970 - _lastAniScrollEndTS < 0.1) {
@@ -4551,62 +4347,25 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
     return YES;
 }
 
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    BOOL result = [self __bo_resultForGestureRecognizerShouldBegin:gestureRecognizer];
-#if DEBUG
-    if (gestureRecognizer == self.panGestureRecognizer) {
-        BOOL storedModelAvailable = _innerSVAttInfCount > 0;
-        BOOL modelEstablishedOrRefreshedForTouch = storedModelAvailable && !_boDebugCaptureBypassReason;
-        NSString *provisionalDriver;
-        if (result) {
-            if (storedModelAvailable && _boDebugCaptureBypassReason) {
-                provisionalDriver = @"retained-coordinated-model-after-capture-bypass(verify actual owner transition)";
-            } else if (modelEstablishedOrRefreshedForTouch) {
-                provisionalDriver = @"coordinated-scroll(current panel pan may drive panel/inner model)";
-            } else if (self.innerScrollViewFirstButCanDrag && _currentScrollView) {
-                provisionalDriver = @"panel-self(inner reached boundary)";
-            } else {
-                provisionalDriver = @"panel-self(no coordinated model)";
-            }
-        } else if (self.inhibitPanelForWebView && _didTouchWebView) {
-            provisionalDriver = @"web/native-scroll(panel inhibited)";
-        } else if (_currentScrollView && self.innerScrollViewFirst) {
-            provisionalDriver = @"native-inner(inner-first)";
-        } else if (_currentScrollView && self.innerScrollViewFirstButCanDrag) {
-            provisionalDriver = @"native-inner(inner can scroll; panel waits for boundary)";
-        } else {
-            provisionalDriver = @"current-pan-rejected(other recognizer/system decides)";
-        }
-        CGFloat velocityY = [self.panGestureRecognizer velocityInView:self.window].y;
-        BODS_DEBUG_LOG(@"[Touch#%lu][Gesture][shouldBegin] result=%@ semantic=%@ provisionalDriver=%@ velocityY=%.2f storedCoordinationModelAvailable=%@ modelEstablishedOrRefreshedForThisTouch=%@ captureBypassReason=%@ currentScrollView=%@",
-                       (unsigned long)_boDebugTouchSequence,
-                       result ? @"YES" : @"NO",
-                       result ? @"当前dragScrollView pan允许开始" : @"当前dragScrollView pan拒绝开始",
-                       provisionalDriver,
-                       velocityY,
-                       storedModelAvailable ? @"YES" : @"NO",
-                       modelEstablishedOrRefreshedForTouch ? @"YES" : @"NO",
-                       _boDebugCaptureBypassReason ? : @"none",
-                       BODragScrollDebugViewDescription(_currentScrollView));
-    }
-#endif
-    return result;
-}
-
 /*
  一些情况下比如修改了attach，直接代码执行了滑动，有时希望暂不吸附，有时希望立即吸附
  这里提供一个手动执行吸附的方法
  */
 - (void)takeAttach:(BOOL)animated subInfo:(NSDictionary *)subInfo {
-    BODragScrollAttachInfo theinfo;
+    // 初始化结构并先检查 scrolltype，避免在没有合法吸附目标时读取未定义的 theinfo。
+    BODragScrollAttachInfo theinfo = {0};
     CGPoint of = self.contentOffset;
     CGPoint inof = of;
-    __unused NSInteger scrolltype =\
+    NSInteger scrolltype =\
     [self __scrollViewWillEndDragging:self
                          withVelocity:CGPointZero
                   targetContentOffset:&inof
                            attachInfo:&theinfo];
     
+    if (0 == scrolltype) {
+        return;
+    }
+
     if (!sf_uifloat_equal(inof.y, of.y)) {
         [self scrollToDisplayH:theinfo.displayH animated:animated];
     }

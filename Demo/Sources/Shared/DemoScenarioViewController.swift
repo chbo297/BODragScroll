@@ -233,7 +233,8 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
                 self.pendingReadyReason = nil
                 markScenarioReady(pendingReadyReason)
             }
-        } else if dragEngine.displayHeight > maximumPanelHeight {
+        } else if allowsPostInitializationHeightCorrection,
+                  dragEngine.displayHeight > maximumPanelHeight {
             dragEngine.move(
                 toDisplayHeight: maximumPanelHeight,
                 animated: false,
@@ -256,6 +257,10 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
     /// Scroll views whose independent state is relevant to Swift/OC comparison. The host scroll
     /// view is always captured separately and must not be repeated here.
     func comparisonScrollViews() -> [(name: String, scrollView: UIScrollView)] { [] }
+
+    /// Scenarios that exercise unassisted natural scrolling can disable the defensive runtime
+    /// correction so an ordinary layout pass never authors a programmatic movement.
+    var allowsPostInitializationHeightCorrection: Bool { true }
 
     /// Web-like scenes can defer the ready marker until their asynchronous content is usable.
     var defersReadyUntilContentLoaded: Bool { false }
