@@ -154,9 +154,7 @@ struct DemoHandoffConfiguration {
 
 struct DemoBounceConfiguration {
     var allowsPanelTopBounce = true
-    // The Demo's panel is capped below the top safe inset, so upward overscroll must never let
-    // its visible height exceed that cap. Bottom-edge bounce can still belong to an inner view.
-    var allowsPanelBottomBounce = false
+    var allowsPanelBottomBounce = true
     var preferredTopOwner: DemoBounceOwner = .panel
     var preferredBottomOwner: DemoBounceOwner = .innerScrollView
     var forcesInnerTopBounce = false

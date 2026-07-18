@@ -1,14 +1,16 @@
-# BODragScroll Swift 实现文档
+# BODragScroll 文档
 
-本目录解释 Swift 重写版的结构、数学原理、UIKit 运行时机和维护边界。阅读顺序从业务能力出发，再逐步进入内部实现，不要求先理解原 Objective-C 单文件代码。
+本目录同时提供面向使用者的接入指南，以及面向维护者的 Swift 实现说明。先从公开 API 建立业务心智模型，再按需要进入数学模型和 UIKit 生命周期。
 
 ## 推荐阅读顺序
 
-1. [ARCHITECTURE.md](ARCHITECTURE.md)：整体分层、功能模块、状态所有权和源码文件边界。
-2. [SCROLL_MODEL.md](SCROLL_MODEL.md)：组合滚动轴、参与段、嵌套拆段、投影和松手目标求解。
-3. [INTERACTION_LIFECYCLE.md](INTERACTION_LIFECYCLE.md)：布局、手指按下、滑动、抬手、减速、手势和辅助功能的完整时序。
+1. [根目录 README](../README.md)：安装和三态面板的完整推荐接入示例。
+2. [USAGE.md](USAGE.md)：程序化移动、事件、自由面板、显式区间、多层嵌套和 Web 内容。
+3. [ARCHITECTURE.md](ARCHITECTURE.md)：整体分层、功能模块、状态所有权和源码文件边界。
+4. [SCROLL_MODEL.md](SCROLL_MODEL.md)：组合滚动轴、参与段、嵌套拆段、投影和松手目标求解。
+5. [INTERACTION_LIFECYCLE.md](INTERACTION_LIFECYCLE.md)：布局、手指按下、滑动、抬手、减速、手势和辅助功能的完整时序。
 
-根目录 [README.md](../README.md) 面向组件使用者，包含安装、公开 API、迁移表和 Demo；本目录面向维护组件实现的开发者。
+只接入组件时，阅读前两项即可；后三项用于理解或修改组件内部实现。
 
 ## 快速心智模型
 
@@ -25,6 +27,7 @@
 修改以下内容时应同步更新文档：
 
 - 新增或改变公开配置、provider、delegate 回调；
+- 改变首页推荐接入方式或常用业务配方；
 - 改变捕获候选、嵌套参与者或 WebView 规则；
 - 改变 `ScrollSegment` 的构建、顺序或投影公式；
 - 改变拖拽、减速、动画、scroll-to-top 的生命周期所有权；

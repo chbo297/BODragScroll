@@ -62,9 +62,13 @@ final class FreePanelViewController: DemoScenarioViewController {
 
     override func detentHeights(for viewportSize: CGSize) -> [CGFloat] { [] }
 
-    override func minimumDisplayHeight(for viewportSize: CGSize) -> CGFloat? { 104 }
+    override func minimumDisplayHeight(for viewportSize: CGSize) -> CGFloat? {
+        minimumInteractiveDisplayHeight(for: viewportSize)
+    }
 
-    override func initialDisplayHeight(for viewportSize: CGSize) -> CGFloat { 190 }
+    override func initialDisplayHeight(for viewportSize: CGSize) -> CGFloat {
+        minimumInteractiveDisplayHeight(for: viewportSize)
+    }
 
     override func comparisonScrollViews() -> [(name: String, scrollView: UIScrollView)] {
         [("freePanelContentScroll", contentScrollView)]

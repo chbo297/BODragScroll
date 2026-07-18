@@ -19,7 +19,7 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
     private var didInvalidateEngine = false
     private var isPendingNavigationRemoval = false
     private var lastViewportSize = CGSize.zero
-    private var lastMaximumPanelHeight: CGFloat = -1
+    private var lastBottomSafeAreaInset: CGFloat = -1
     private var latestSource: String
     private var latestEvent: String
     private var lastHUDPublication: CFTimeInterval = 0
@@ -93,8 +93,8 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
             heroLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 28),
             heroLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -28),
 
-            // The drag host intentionally owns the complete screen. Only its panel size and
-            // display-height inputs are restricted to the area below the top safe inset.
+            // The drag host and the panel's maximum state intentionally own the complete viewport.
+            // Avoid implying that BODragScroll imposes a safe-area ceiling on client geometry.
             dragScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             dragScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             dragScrollView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -116,7 +116,9 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
             implementationTabs.heightAnchor.constraint(equalToConstant: 40),
 
             readyMarker.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            readyMarker.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            // UI tests use this invisible marker to observe the bottom inset that participates in
+            // the Demo's lowest-state usability rule. It has no component-layout responsibility.
+            readyMarker.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
             readyMarker.widthAnchor.constraint(equalToConstant: 1),
             readyMarker.heightAnchor.constraint(equalToConstant: 1)
         ])
@@ -160,28 +162,30 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        updateHeightSafetyForCurrentViewport()
+        updateDemoGeometryForCurrentViewport()
     }
 
     override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
-        // Apply a reduced safe-area ceiling synchronously when bounds are already valid. The next
-        // regular layout pass remains a fallback for early callbacks that arrive before sizing.
-        updateHeightSafetyForCurrentViewport()
-        view.setNeedsLayout()
+        // Safe area is not a panel maximum. Only the bottom inset participates in the Demo's own
+        // lowest-state usability rule, so a top-only change must not invalidate component layout.
+        let bottomInset = normalizedBottomSafeAreaInset(for: dragScrollView.bounds.size)
+        guard bottomInset != lastBottomSafeAreaInset else { return }
+        updateDemoGeometryForCurrentViewport()
     }
 
-    private func updateHeightSafetyForCurrentViewport() {
+    private func updateDemoGeometryForCurrentViewport() {
         let viewportSize = dragScrollView.bounds.size
         guard viewportSize.width > 0, viewportSize.height > 0 else { return }
 
-        let maximumPanelHeight = availablePanelHeight(for: viewportSize)
+        let maximumPanelHeight = panelMaximumHeight(for: viewportSize)
+        let bottomSafeAreaInset = normalizedBottomSafeAreaInset(for: viewportSize)
         let viewportChanged = viewportSize != lastViewportSize
-        let maximumHeightChanged = maximumPanelHeight != lastMaximumPanelHeight
+        let bottomInsetChanged = bottomSafeAreaInset != lastBottomSafeAreaInset
         let hadPreviousViewport = lastViewportSize != .zero
-        if viewportChanged || maximumHeightChanged {
+        if viewportChanged || bottomInsetChanged {
             lastViewportSize = viewportSize
-            lastMaximumPanelHeight = maximumPanelHeight
+            lastBottomSafeAreaInset = bottomSafeAreaInset
             dragEngine.detentHeights = clampedDetentHeights(
                 detentHeights(for: viewportSize),
                 maximum: maximumPanelHeight
@@ -191,18 +195,18 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
                 maximum: maximumPanelHeight
             )
             dragEngine.minimumDisplayHeight = minimumDisplayHeight(for: viewportSize).map {
-                engineSafeHeight($0, maximum: maximumPanelHeight)
+                engineRepresentableHeight($0, maximum: maximumPanelHeight)
             }
             viewportDidChange(to: viewportSize)
             dragEngine.reloadScrollMetrics()
-            if hadPreviousViewport {
-                // Reconcile presentation-state animations as well as geometry. This explicit path
-                // is required for safe-area-only changes and also hardens rotation during motion.
+            if hadPreviousViewport, viewportChanged {
+                // A real viewport change can resize the panel and must reconcile presentation-state
+                // animations. Bottom-inset-only changes update Demo detents without resizing it.
                 recordTrace(
                     "viewportInvalidation",
                     details: [
                         "viewport": String(format: "%.6f,%.6f", viewportSize.width, viewportSize.height),
-                        "safeMaximum": String(format: "%.6f", maximumPanelHeight),
+                        "viewportMaximum": String(format: "%.6f", maximumPanelHeight),
                         "visiblePanelHeight": String(
                             format: "%.6f",
                             presentationDisplayHeight()
@@ -211,7 +215,7 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
                 )
                 publishHUD(force: true)
                 dragEngine.invalidatePanelLayout()
-            } else {
+            } else if !hadPreviousViewport {
                 dragScrollView.setNeedsLayout()
             }
         }
@@ -221,8 +225,14 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
 
         if !didApplyInitialHeight {
             didApplyInitialHeight = true
+            let lowerBound = dragEngine.detentHeights.first
+                ?? dragEngine.minimumDisplayHeight
+                ?? 0
             dragEngine.move(
-                toDisplayHeight: min(maximumPanelHeight, max(0, initialDisplayHeight(for: viewportSize))),
+                toDisplayHeight: min(
+                    maximumPanelHeight,
+                    max(lowerBound, initialDisplayHeight(for: viewportSize))
+                ),
                 animated: false,
                 options: .init(),
                 completion: nil
@@ -288,13 +298,29 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
     func applyInitialConfiguration() {}
 
     func panelSize(for viewportSize: CGSize) -> CGSize {
-        CGSize(width: viewportSize.width, height: availablePanelHeight(for: viewportSize))
+        CGSize(width: viewportSize.width, height: panelMaximumHeight(for: viewportSize))
     }
 
     func detentHeights(for viewportSize: CGSize) -> [CGFloat] {
-        let maximum = availablePanelHeight(for: viewportSize)
-        let low = min(150, maximum)
-        let middle = min(maximum, max(low, min(390, maximum - 80)))
+        let maximum = panelMaximumHeight(for: viewportSize)
+        guard maximum > 0 else { return [] }
+
+        // Ordinary scenarios place their inner scroll view at DemoPanelView.contentTopInset. Keep
+        // 50pt of that region above the bottom safe area in the lowest state. This is a Demo UX
+        // choice, not a BODragScroll constraint.
+        let desiredLow = minimumInteractiveDisplayHeight(for: viewportSize)
+        let minimumGap: CGFloat = 1
+        guard maximum >= minimumGap * 2 else {
+            return [maximum]
+        }
+
+        // If an exceptionally small viewport cannot satisfy both usability and three distinct
+        // states, preserve strict ordering and degrade the lowest height by the unavoidable amount.
+        let low = min(desiredLow, maximum - minimumGap * 2)
+        let middleLowerBound = low + minimumGap
+        let middleUpperBound = maximum - minimumGap
+        let preferredMiddle = min(390, maximum - 80)
+        let middle = min(middleUpperBound, max(middleLowerBound, preferredMiddle))
         return [low, middle, maximum]
     }
 
@@ -304,10 +330,19 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
 
     func initialDisplayHeight(for viewportSize: CGSize) -> CGFloat { 210 }
 
-    /// Convert a scene-authored height to the exact Float32 value both kernels will consume,
-    /// choosing the lower representable value whenever rounding upward could cross the safe cap.
-    func safeDisplayHeightForEngine(_ height: CGFloat, viewportSize: CGSize) -> CGFloat {
-        engineSafeHeight(height, maximum: availablePanelHeight(for: viewportSize))
+    /// Lowest panel height used by the Demo to leave ordinary scenario content reachable.
+    func minimumInteractiveDisplayHeight(for viewportSize: CGSize) -> CGFloat {
+        let maximum = panelMaximumHeight(for: viewportSize)
+        let desired = normalizedBottomSafeAreaInset(for: viewportSize)
+            + DemoPanelView.contentTopInset
+            + 50
+        return min(maximum, max(150, desired))
+    }
+
+    /// Convert a scene-authored height to the exact Float32 value both comparison engines consume,
+    /// choosing the lower representable value when upward rounding would exceed panel geometry.
+    func displayHeightForEngine(_ height: CGFloat, viewportSize: CGSize) -> CGFloat {
+        engineRepresentableHeight(height, maximum: panelMaximumHeight(for: viewportSize))
     }
 
     func viewportDidChange(to viewportSize: CGSize) {}
@@ -391,7 +426,7 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
         proposedDisplayHeight: inout CGFloat
     ) -> CGSize {
         let viewportSize = engine.scrollView.bounds.size
-        let maximumHeight = availablePanelHeight(for: viewportSize)
+        let maximumHeight = panelMaximumHeight(for: viewportSize)
         let requestedSize = panelSize(for: viewportSize)
         let originalProposedDisplayHeight = proposedDisplayHeight
         proposedDisplayHeight = min(maximumHeight, max(0, proposedDisplayHeight))
@@ -418,7 +453,7 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
         let viewportSize = engine.scrollView.bounds.size
         let result = segments(for: scrollView)?.map { segment in
             var segment = segment
-            segment.displayHeight = safeDisplayHeightForEngine(
+            segment.displayHeight = displayHeightForEngine(
                 segment.displayHeight,
                 viewportSize: viewportSize
             )
@@ -711,15 +746,19 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
         navigationController.setViewControllers(controllers, animated: false)
     }
 
-    // MARK: - Height safety
+    // MARK: - Demo geometry
 
-    private func availablePanelHeight(for viewportSize: CGSize) -> CGFloat {
-        max(0, viewportSize.height - view.safeAreaInsets.top)
+    private func panelMaximumHeight(for viewportSize: CGSize) -> CGFloat {
+        max(0, viewportSize.height)
+    }
+
+    private func normalizedBottomSafeAreaInset(for viewportSize: CGSize) -> CGFloat {
+        min(panelMaximumHeight(for: viewportSize), max(0, view.safeAreaInsets.bottom))
     }
 
     private func clampedDetentHeights(_ heights: [CGFloat], maximum: CGFloat) -> [CGFloat] {
         heights
-            .map { engineSafeHeight($0, maximum: maximum) }
+            .map { engineRepresentableHeight($0, maximum: maximum) }
             .sorted()
             .reduce(into: [CGFloat]()) { result, value in
                 guard result.last != value else { return }
@@ -728,9 +767,8 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
     }
 
     /// Both kernels intentionally interpret OC numeric inputs with Float32 semantics. Quantize
-    /// before crossing the engine boundary, but always choose the representable value at or below
-    /// the safe-area ceiling so conversion can never turn rounding into a real visual overflow.
-    private func engineSafeHeight(_ height: CGFloat, maximum: CGFloat) -> CGFloat {
+    /// before crossing the engine boundary while keeping values inside the Demo-authored panel.
+    private func engineRepresentableHeight(_ height: CGFloat, maximum: CGFloat) -> CGFloat {
         let clamped = min(maximum, max(0, height))
         let floatValue = Float(clamped)
         guard floatValue.isFinite else { return 0 }

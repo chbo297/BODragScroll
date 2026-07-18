@@ -1,6 +1,11 @@
 import UIKit
 
 final class DemoPanelView: UIView {
+    /// Vertical origin shared by ordinary scenario content. Demo detent sizing uses the same
+    /// value so the lowest state leaves a usable slice of that content visible; scrolling
+    /// scenarios normally pin their participant to this edge.
+    static let contentTopInset: CGFloat = 152
+
     let contentView = UIView()
 
     private let titleLabel = UILabel()
@@ -70,7 +75,7 @@ final class DemoPanelView: UIView {
             labels.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -72),
             labels.topAnchor.constraint(equalTo: grabber.bottomAnchor, constant: 9),
 
-            contentView.topAnchor.constraint(equalTo: topAnchor, constant: 152),
+            contentView.topAnchor.constraint(equalTo: topAnchor, constant: Self.contentTopInset),
             contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
             contentView.bottomAnchor.constraint(equalTo: bottomAnchor)

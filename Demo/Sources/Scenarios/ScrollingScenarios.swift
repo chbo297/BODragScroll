@@ -152,7 +152,7 @@ final class TableHandoffViewController: DemoScenarioViewController {
         case 2:
             let detents = detentHeights(for: dragScrollView.bounds.size)
             configuration.handoff.innerScrollPlacement = .atDisplayHeight(
-                safeDisplayHeightForEngine(detents[1], viewportSize: dragScrollView.bounds.size)
+                displayHeightForEngine(detents[1], viewportSize: dragScrollView.bounds.size)
             )
         case 3:
             configuration.handoff.innerScrollPlacement = .fromTouchedPosition
@@ -331,7 +331,7 @@ final class AutomaticSmartHandoffViewController: DemoScenarioViewController {
 
     private func installDocumentContent() {
         let instruction = DemoControlFactory.caption(
-            "功能：验证默认 automatic 智能放置如何在面板和内部 UIScrollView 之间分配同一次手势。\n操作：保持默认设置，从最低吸附点按住本区域向上拖到底；观察 HUD 先显示 panel，达到自动激活高度后切换为 inner。\n几何：内部视图从 panel y=40 延伸到底部，有效可滑动距离为 2000pt，吸附点为 150 / 390 / 安全区最大高度。"
+            "功能：验证默认 automatic 智能放置如何在面板和内部 UIScrollView 之间分配同一次手势。\n操作：保持默认设置，从最低吸附点按住本区域向上拖到底；观察 HUD 先显示 panel，达到自动激活高度后切换为 inner。\n几何：内部视图从 panel y=40 延伸到底部，有效可滑动距离为 2000pt，使用低 / 中 / 完整 viewport 三态吸附。"
         )
         instruction.backgroundColor = DemoPalette.surface.withAlphaComponent(0.94)
         instruction.layer.cornerRadius = 14

@@ -1,18 +1,36 @@
 import XCTest
 
-final class ViewportSafetyParityUITests: DemoUITestCase {
+final class ViewportLayoutParityUITests: DemoUITestCase {
     private struct Observation {
         let portraitMaximum: CGFloat
         let landscapeMaximum: CGFloat
         let restoredPortraitMaximum: CGFloat
     }
 
-    func testFreePanelMaximumTracksSafeViewportAcrossRotation() {
+    func testFreePanelMaximumTracksFullViewportAcrossRotation() {
         assertRotationParity(scenario: .freePanel)
     }
 
-    func testNestedPanelMaximumTracksSafeViewportAcrossRotation() {
+    func testNestedPanelMaximumTracksFullViewportAcrossRotation() {
         assertRotationParity(scenario: .nestedScrollChain)
+    }
+
+    func testLowestStateLeavesOrdinaryInnerScrollRegionReachable() {
+        for implementation in [DemoImplementationUnderTest.swift, .objectiveC] {
+            _ = launch(scenario: .tableHandoff, implementation: implementation)
+            let height = dragPanel(toNormalizedScreenY: 0.995)
+            let bottomInset = demoBottomSafeAreaInset()
+            XCTAssertGreaterThan(
+                height - bottomInset,
+                100,
+                "The Demo's lowest state must extend more than 100pt above the bottom safe area"
+            )
+            XCTAssertGreaterThanOrEqual(
+                height - bottomInset - 152,
+                50 - 0.5,
+                "At least 50pt of ordinary inner-scroll space must remain interactable"
+            )
+        }
     }
 
     func testRotationDuringActiveMovementDoesNotDuplicateTerminalCallbacks() {
@@ -29,7 +47,7 @@ final class ViewportSafetyParityUITests: DemoUITestCase {
             let interrupt = requireElement("movement.interrupt")
             XCTAssertTrue(interrupt.isHittable, "The sticky interruption action is not hittable")
             XCTAssertEqual(waitForStableDisplayHeight(), 390, accuracy: 1)
-            let portraitCeiling = safeViewportHeight()
+            let portraitCeiling = viewportHeight()
 
             let baseline = latestTraceSequence
             interrupt.tap()
@@ -63,7 +81,7 @@ final class ViewportSafetyParityUITests: DemoUITestCase {
                 "Both overlapping View-animation transactions must terminate during relayout"
             )
             let settledLandscapeHeight = waitForStableDisplayHeight()
-            assertHeightInsideSafeViewport(settledLandscapeHeight)
+            assertHeightInsideViewport(settledLandscapeHeight)
             settledLandscapeHeights.append(settledLandscapeHeight)
             let completions = traceLines(after: baseline).filter {
                 $0.contains(" movementCompletion h=")
@@ -175,8 +193,8 @@ final class ViewportSafetyParityUITests: DemoUITestCase {
         XCUIDevice.shared.orientation = .portrait
         _ = launch(scenario: scenario, implementation: implementation)
 
-        let portraitMaximum = expandToSafeMaximum()
-        assertHeightInsideSafeViewport(portraitMaximum)
+        let portraitMaximum = expandToViewportMaximum()
+        assertHeightInsideViewport(portraitMaximum)
 
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(
@@ -185,13 +203,13 @@ final class ViewportSafetyParityUITests: DemoUITestCase {
         )
         _ = waitForStableDisplayHeight()
         attachGeometry("landscape-before-expand-\(scenario.name)-\(implementation.rawValue)")
-        let landscapeMaximum = expandToSafeMaximum()
-        assertHeightInsideSafeViewport(landscapeMaximum)
+        let landscapeMaximum = expandToViewportMaximum()
+        assertHeightInsideViewport(landscapeMaximum)
 
-        // Pull upward once more at the ceiling. The demo disables the unsafe top-overrun bounce,
-        // so the settled display height must remain bounded by the current safe viewport.
+        // Pull upward once more at the ceiling. Bounce may temporarily overshoot, but settling must
+        // return to the Demo-authored full-viewport detent.
         dragVisiblePanelContent(deltaY: -90, visibleOffsetFromPanelTop: 180, velocity: .slow)
-        assertHeightInsideSafeViewport(waitForStableDisplayHeight())
+        assertHeightInsideViewport(waitForStableDisplayHeight())
 
         XCUIDevice.shared.orientation = .portrait
         XCTAssertTrue(
@@ -199,8 +217,8 @@ final class ViewportSafetyParityUITests: DemoUITestCase {
             "Application did not rotate back to portrait"
         )
         _ = waitForStableDisplayHeight()
-        let restoredPortraitMaximum = expandToSafeMaximum()
-        assertHeightInsideSafeViewport(restoredPortraitMaximum)
+        let restoredPortraitMaximum = expandToViewportMaximum()
+        assertHeightInsideViewport(restoredPortraitMaximum)
 
         attachHUDTrace(
             "viewport-\(scenario.name)-\(implementation.rawValue)",
@@ -248,43 +266,39 @@ final class ViewportSafetyParityUITests: DemoUITestCase {
         return Double(token).map { CGFloat($0) }
     }
 
-    private func expandToSafeMaximum() -> CGFloat {
+    private func expandToViewportMaximum() -> CGFloat {
         var height = waitForStableDisplayHeight()
         for _ in 0..<4 {
-            let ceiling = safeViewportHeight()
+            let ceiling = viewportHeight()
             if abs(height - ceiling) <= 1 { break }
             height = dragPanel(deltaY: -app.frame.height * 0.72, velocity: .slow)
         }
-        let ceiling = safeViewportHeight()
+        let ceiling = viewportHeight()
         XCTAssertEqual(
             height,
             ceiling,
             accuracy: 1,
-            "Highest detent must equal the viewport minus its top safe-area inset"
+            "Highest detent must equal the complete drag-host viewport"
         )
         return height
     }
 
-    private func assertHeightInsideSafeViewport(
+    private func assertHeightInsideViewport(
         _ height: CGFloat,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let ceiling = safeViewportHeight()
+        let ceiling = viewportHeight()
         XCTAssertLessThanOrEqual(
             height,
             ceiling + 0.5,
-            "Panel exceeded the top-safe viewport: height=\(height), ceiling=\(ceiling)",
+            "Panel exceeded the Demo viewport: height=\(height), ceiling=\(ceiling)",
             file: file,
             line: line
         )
     }
 
-    private func safeViewportHeight() -> CGFloat {
-        let marker = requireElement(DemoAccessibilityID.ready)
-        // `demo.ready` is a one-point invisible view pinned to safeAreaLayoutGuide.topAnchor.
-        // Its screen-space y therefore exposes the exact top safe-area inset used by the demo.
-        let safeTop = max(0, marker.frame.minY - app.frame.minY)
-        return max(0, app.frame.height - safeTop)
+    private func viewportHeight() -> CGFloat {
+        requireElement(DemoAccessibilityID.dragHost).frame.height
     }
 }

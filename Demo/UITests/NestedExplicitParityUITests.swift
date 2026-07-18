@@ -76,7 +76,7 @@ final class NestedExplicitParityUITests: DemoUITestCase {
             XCTAssertLessThanOrEqual(
                 swift.maximumObservedHeight,
                 swift.expandedHeight + 1,
-                "Nested participant drag exceeded the panel's safe maximum. Trace:\n\(swift.trace)"
+                "Nested participant drag exceeded the panel's configured maximum. Trace:\n\(swift.trace)"
             )
             XCTAssertGreaterThan(
                 swift.totalParticipantMovement,

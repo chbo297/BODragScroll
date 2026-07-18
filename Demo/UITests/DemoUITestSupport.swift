@@ -26,12 +26,12 @@ enum DemoScenarioUnderTest: Int, CaseIterable {
         }
     }
 
-    var expectedInitialDisplayHeight: CGFloat {
+    var authoredInitialDisplayHeight: CGFloat {
         switch self {
-        case .freePanel: return 190
+        case .freePanel: return 0
         case .movement: return 390
         case .tableHandoff: return 250
-        case .automaticSmartHandoff: return 150
+        case .automaticSmartHandoff: return 0
         case .nestedScrollChain: return 300
         case .explicitSegments: return 230
         case .policyLab: return 330
@@ -116,13 +116,31 @@ class DemoUITestCase: XCTestCase {
         let height = waitForStableDisplayHeight(file: file, line: line)
         XCTAssertEqual(
             height,
-            scenario.expectedInitialDisplayHeight,
+            expectedInitialDisplayHeight(for: scenario),
             accuracy: 0.75,
             "Unexpected initial display height for \(scenario.name)/\(implementation.rawValue)",
             file: file,
             line: line
         )
         return height
+    }
+
+    /// Mirrors the Demo's authored initial-height rule without treating safe area as a component
+    /// maximum. The bottom inset only raises the Demo's lowest usable state.
+    func expectedInitialDisplayHeight(for scenario: DemoScenarioUnderTest) -> CGFloat {
+        min(
+            app.frame.height,
+            max(scenario.authoredInitialDisplayHeight, demoMinimumInteractiveDisplayHeight())
+        )
+    }
+
+    func demoMinimumInteractiveDisplayHeight() -> CGFloat {
+        min(app.frame.height, max(150, demoBottomSafeAreaInset() + 152 + 50))
+    }
+
+    func demoBottomSafeAreaInset() -> CGFloat {
+        let marker = requireElement(DemoAccessibilityID.ready)
+        return max(0, app.frame.maxY - marker.frame.maxY)
     }
 
     func element(_ identifier: String) -> XCUIElement {

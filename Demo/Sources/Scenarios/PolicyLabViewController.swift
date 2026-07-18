@@ -86,7 +86,7 @@ final class PolicyLabViewController: DemoScenarioViewController {
 
         let policyCard = DemoCardView(
             title: "功能与操作 · 运行时策略",
-            detail: "功能：对比面板与内部列表的交接顺序、越界回弹归属和收起阻力。\n操作：从下方列表开始上下拖动并越过顶部或底部；每次切换后先抬手，再重新触摸。\n边界：为保证面板永不越过顶部安全区，面板向上的 bottom bounce 始终关闭；『面板顶』只演示向下拉时由面板回弹，列表底部仍由列表回弹。\n对齐说明：OC 的交接选项对应原实现的布尔策略组合，边界手感可能不完全相同。当前：\(implementation.displayName)。",
+            detail: "功能：对比面板与内部列表的交接顺序、越界回弹归属和收起阻力。\n操作：从下方列表开始上下拖动并越过顶部或底部；每次切换后先抬手，再重新触摸。\n边界：『面板顶』让向下拉由面板回弹；『列表』把顶部与底部越界优先交给列表；『关闭』禁用两端回弹。\n对齐说明：OC 的交接选项对应原实现的布尔策略组合，边界手感可能不完全相同。当前：\(implementation.displayName)。",
             tint: DemoPalette.green
         )
 
@@ -148,7 +148,7 @@ final class PolicyLabViewController: DemoScenarioViewController {
         switch bounceControl.selectedSegmentIndex {
         case 1:
             configuration.bounce.allowsPanelTopBounce = true
-            configuration.bounce.allowsPanelBottomBounce = false
+            configuration.bounce.allowsPanelBottomBounce = true
             configuration.bounce.preferredTopOwner = .innerScrollView
             configuration.bounce.preferredBottomOwner = .innerScrollView
             configuration.bounce.forcesInnerTopBounce = true
@@ -160,7 +160,7 @@ final class PolicyLabViewController: DemoScenarioViewController {
             tableView.bounces = false
         default:
             configuration.bounce.allowsPanelTopBounce = true
-            configuration.bounce.allowsPanelBottomBounce = false
+            configuration.bounce.allowsPanelBottomBounce = true
             configuration.bounce.preferredTopOwner = .panel
             configuration.bounce.preferredBottomOwner = .innerScrollView
             configuration.bounce.forcesInnerTopBounce = false

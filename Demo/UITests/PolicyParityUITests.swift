@@ -346,8 +346,10 @@ final class PolicyParityUITests: DemoUITestCase {
             handoff: .coordinated,
             bounce: mode,
             resistance: false,
-            targetHeight: 150
+            targetHeight: nil
         )
+        let lowestDetent = dragPanel(deltaY: app.frame.height * 0.72)
+        XCTAssertEqual(lowestDetent, demoMinimumInteractiveDisplayHeight(), accuracy: 1)
         let baseline = latestTraceSequence
         _ = dragPanel(deltaY: 100, velocity: .slow)
         let settledHeight = waitForStableDisplayHeight()

@@ -29,7 +29,7 @@ final class MovementHandoffParityUITests: DemoUITestCase {
     }
 
     func testMovementNearestFromBothSidesOfMidpointMatchesObjectiveC() {
-        for (desiredHeight, expectedDetent) in [(245.0, 150.0), (315.0, 390.0)] as [(CGFloat, CGFloat)] {
+        for (desiredHeight, expectsMiddle) in [(300.0, false), (335.0, true)] as [(CGFloat, Bool)] {
             let swift = runMeaningfulNearest(
                 implementation: .swift,
                 desiredHeight: desiredHeight
@@ -38,6 +38,7 @@ final class MovementHandoffParityUITests: DemoUITestCase {
                 implementation: .objectiveC,
                 desiredHeight: desiredHeight
             )
+            let expectedDetent = expectsMiddle ? 390 : demoMinimumInteractiveDisplayHeight()
 
             XCTAssertEqual(swift, expectedDetent, accuracy: 2)
             XCTAssertEqual(objectiveC, expectedDetent, accuracy: 2)
@@ -84,8 +85,9 @@ final class MovementHandoffParityUITests: DemoUITestCase {
         let swift = runAutomaticSmartHandoff(implementation: .swift)
         let objectiveC = runAutomaticSmartHandoff(implementation: .objectiveC)
 
-        XCTAssertEqual(swift.initialHeight, 150, accuracy: swift.onePhysicalPixel)
-        XCTAssertEqual(objectiveC.initialHeight, 150, accuracy: objectiveC.onePhysicalPixel)
+        let expectedLow = demoMinimumInteractiveDisplayHeight()
+        XCTAssertEqual(swift.initialHeight, expectedLow, accuracy: swift.onePhysicalPixel)
+        XCTAssertEqual(objectiveC.initialHeight, expectedLow, accuracy: objectiveC.onePhysicalPixel)
         XCTAssertEqual(
             swift.activationHeight,
             objectiveC.activationHeight,
@@ -259,7 +261,7 @@ private extension MovementHandoffParityUITests {
         )
         let low = performMovement(
             control: "movement.low",
-            expectedHeight: 150,
+            expectedHeight: demoMinimumInteractiveDisplayHeight(),
             implementation: implementation,
             file: file,
             line: line
@@ -404,11 +406,12 @@ private extension MovementHandoffParityUITests {
                 file: file,
                 line: line
             )
-            if (190...360).contains(retainedHeight) { break }
+            let lowerBound = demoMinimumInteractiveDisplayHeight() + 35
+            if (lowerBound...360).contains(retainedHeight) { break }
         }
 
         XCTAssertTrue(
-            (190...360).contains(retainedHeight),
+            (demoMinimumInteractiveDisplayHeight() + 35...360).contains(retainedHeight),
             "Release did not remain inside the configured non-snapping range",
             file: file,
             line: line
@@ -474,7 +477,11 @@ private extension MovementHandoffParityUITests {
             line: line
         )
         XCTAssertEqual(retainedHeight, desiredHeight, accuracy: 20, file: file, line: line)
-        XCTAssertTrue((190...360).contains(retainedHeight), file: file, line: line)
+        XCTAssertTrue(
+            (demoMinimumInteractiveDisplayHeight() + 35...360).contains(retainedHeight),
+            file: file,
+            line: line
+        )
 
         let visibleRangeSwitch = movementControl("movement.range", file: file, line: line)
         visibleRangeSwitch.tap()
@@ -843,8 +850,8 @@ private extension MovementHandoffParityUITests {
         }
 
         let baseline = latestTraceSequence
-        // At the lowest 150pt detent this starts 90pt below the panel top: inside the participant's
-        // y=40...150 visible slice, never on the panel-only grabber. Derive the distance from the
+        // Start 90pt below the panel top: inside the participant's y=40...low visible slice, never
+        // on the panel-only grabber. Derive the distance from the
         // selected activation detent so the test remains valid on taller future viewports.
         let upwardDistance = max(120, activationHeight - initialHeight + 80)
         dragVisiblePanelContent(
