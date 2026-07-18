@@ -41,6 +41,47 @@ final class BODragScrollModelTests: XCTestCase {
         XCTAssertEqual(policy.snappingToNearestEndpoint(-0.25, 0, 10), -0.25)
     }
 
+    func testProjectedHeightSeparatesKnownTargetsFromContinuousGeometry() {
+        let policy = ScrollComparisonPolicy(displayScale: 3)
+        let authoritative = ProjectedHeight.authoritative(873)
+        let geometric = ProjectedHeight.geometric(872.75)
+        let outerOffset: CGFloat = 1_234.567_89
+        let fallbackOrigin: CGFloat = 400
+
+        XCTAssertEqual(
+            authoritative.panelOriginY(
+                viewportHeight: 874,
+                outerOffsetY: outerOffset,
+                geometricFallback: fallbackOrigin
+            ),
+            874 + outerOffset - 873
+        )
+        XCTAssertEqual(
+            geometric.panelOriginY(
+                viewportHeight: 874,
+                outerOffsetY: outerOffset,
+                geometricFallback: fallbackOrigin
+            ),
+            fallbackOrigin
+        )
+
+        XCTAssertEqual(
+            authoritative.publishedValue(actual: CGFloat(873).nextUp, comparison: policy),
+            873
+        )
+        XCTAssertEqual(
+            ProjectedHeight.authoritative(200).publishedValue(
+                actual: 199.9999,
+                comparison: policy
+            ),
+            199.9999
+        )
+        XCTAssertEqual(
+            geometric.publishedValue(actual: CGFloat(873).nextUp, comparison: policy),
+            CGFloat(873).nextUp
+        )
+    }
+
     func testBuilderMergesDetentWithParticipantSegmentAtSameDisplayHeight() throws {
         let model = try ScrollModelBuilder.build(
             from: ScrollModelSnapshot(
@@ -89,14 +130,14 @@ final class BODragScrollModelTests: XCTestCase {
         XCTAssertEqual(middle.activeOwner, .participant(other))
         XCTAssertEqual(middle.offset(for: primary), 20)
         XCTAssertEqual(middle.offset(for: other), 30)
-        XCTAssertEqual(middle.panelTranslation, 50)
+        XCTAssertEqual(middle.panelOriginY, 50)
         XCTAssertEqual(middle.displayHeight, 300)
 
         let secondPrimarySlice = model.projection(at: -220)
         XCTAssertEqual(secondPrimarySlice.activeOwner, .participant(primary))
         XCTAssertEqual(secondPrimarySlice.offset(for: primary), 30)
         XCTAssertEqual(secondPrimarySlice.offset(for: other), 50)
-        XCTAssertEqual(secondPrimarySlice.panelTranslation, 80)
+        XCTAssertEqual(secondPrimarySlice.panelOriginY, 80)
         XCTAssertEqual(secondPrimarySlice.displayHeight, 300)
     }
 
@@ -123,7 +164,7 @@ final class BODragScrollModelTests: XCTestCase {
         XCTAssertFalse(secondStart.isParticipantScrolling)
         XCTAssertEqual(secondStart.offset(for: primary), 20)
         XCTAssertEqual(secondStart.offset(for: other), 0)
-        XCTAssertEqual(secondStart.panelTranslation, 20)
+        XCTAssertEqual(secondStart.panelOriginY, 20)
 
         // The same rule applies when returning to a later slice of an owner
         // that already appeared earlier on the composite axis.
@@ -132,7 +173,7 @@ final class BODragScrollModelTests: XCTestCase {
         XCTAssertFalse(thirdStart.isParticipantScrolling)
         XCTAssertEqual(thirdStart.offset(for: primary), 20)
         XCTAssertEqual(thirdStart.offset(for: other), 50)
-        XCTAssertEqual(thirdStart.panelTranslation, 70)
+        XCTAssertEqual(thirdStart.panelOriginY, 70)
     }
 
     func testProjectionSkipsZeroLengthSegmentWhenNextSegmentHasSameStart() throws {
@@ -155,7 +196,7 @@ final class BODragScrollModelTests: XCTestCase {
         XCTAssertFalse(exact.isParticipantScrolling)
         XCTAssertEqual(exact.offset(for: primary), 0)
         XCTAssertEqual(exact.offset(for: other), 0)
-        XCTAssertEqual(exact.panelTranslation, 0)
+        XCTAssertEqual(exact.panelOriginY, 0)
     }
 
     func testZeroLengthParticipantRemainsADragInnerAnchor() throws {
@@ -202,12 +243,12 @@ final class BODragScrollModelTests: XCTestCase {
 
         let arithmeticResidue = model.projection(at: segment.outerStart - 0.000_05)
         XCTAssertEqual(arithmeticResidue.offset(for: primary), segment.innerStart)
-        XCTAssertEqual(arithmeticResidue.fixedDisplayHeight, segment.displayHeight)
+        XCTAssertEqual(arithmeticResidue.authoritativeDisplayHeight, segment.displayHeight)
         XCTAssertEqual(arithmeticResidue.displayHeight, segment.displayHeight)
 
         let physicalPixelPreEntry = model.projection(at: segment.outerStart - 0.25)
         XCTAssertEqual(physicalPixelPreEntry.offset(for: primary), segment.innerStart - 0.25)
-        XCTAssertNil(physicalPixelPreEntry.fixedDisplayHeight)
+        XCTAssertNil(physicalPixelPreEntry.authoritativeDisplayHeight)
         XCTAssertEqual(physicalPixelPreEntry.displayHeight, segment.displayHeight)
     }
 
@@ -227,12 +268,232 @@ final class BODragScrollModelTests: XCTestCase {
         let segment = try XCTUnwrap(model.segments.first)
         let projection = model.projection(at: segment.outerStart + 777.777_777)
 
-        XCTAssertEqual(projection.fixedDisplayHeight, authoritativeHeight)
+        XCTAssertEqual(projection.authoritativeDisplayHeight, authoritativeHeight)
         XCTAssertEqual(projection.displayHeight, authoritativeHeight)
         XCTAssertEqual(
-            projection.panelTranslation,
+            projection.panelOriginY,
             model.viewportHeight + projection.outerOffset - authoritativeHeight
         )
+    }
+
+    func testProjectionUsesPanelAnchorAuthorityOnlyForMachineNoise() throws {
+        let model = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 3,
+                detents: [.native(300), .native(500)],
+                participantOrder: [primary],
+                participantSegments: [
+                    segment(primary, displayHeight: 300, start: 0, end: 100.3)
+                ]
+            )
+        )
+        let panelAnchor = try XCTUnwrap(
+            model.segments.last(where: { !$0.isParticipantSegment })
+        )
+
+        for outerOffset in [
+            panelAnchor.outerStart,
+            panelAnchor.outerStart.nextUp,
+            panelAnchor.outerStart.nextDown
+        ] {
+            let projection = model.projection(at: outerOffset)
+            XCTAssertEqual(projection.authoritativeDisplayHeight, panelAnchor.displayHeight)
+            XCTAssertEqual(projection.displayHeight, panelAnchor.displayHeight)
+        }
+
+        let realIntermediateOffset = panelAnchor.outerStart - 0.000_05
+        let intermediate = model.projection(at: realIntermediateOffset)
+        XCTAssertNil(intermediate.authoritativeDisplayHeight)
+        XCTAssertNotEqual(intermediate.displayHeight, panelAnchor.displayHeight)
+    }
+
+    func testAdaptiveParticipantAxisRebaseIsContinuousAtUpperPivot() throws {
+        let model = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [],
+                participantOrder: [primary],
+                participantSegments: [segment(primary, displayHeight: 300, start: 0, end: 100)]
+            )
+        )
+        let oldSegment = try XCTUnwrap(model.segments.first)
+        let pivotDisplayHeight: CGFloat = 500
+        let pivotOuterOffset = oldSegment.outerEnd + pivotDisplayHeight - oldSegment.displayHeight
+        let oldPivot = model.projection(at: pivotOuterOffset)
+
+        let rebased = try XCTUnwrap(
+            model.rebasedAdaptiveParticipantAxis(to: pivotDisplayHeight)
+        )
+        let newSegment = try XCTUnwrap(rebased.segments.first)
+        let newPivot = rebased.projection(at: pivotOuterOffset)
+
+        XCTAssertEqual(newPivot.displayHeight, oldPivot.displayHeight)
+        XCTAssertEqual(newPivot.panelOriginY, oldPivot.panelOriginY)
+        XCTAssertEqual(newPivot.participantOffsets, oldPivot.participantOffsets)
+        XCTAssertEqual(newSegment.displayHeight, pivotDisplayHeight)
+        XCTAssertEqual(newSegment.innerStart, oldSegment.innerStart)
+        XCTAssertEqual(newSegment.innerEnd, oldSegment.innerEnd)
+
+        // On the first returning point, the old model would lower the panel. The rebased model
+        // instead keeps the new activation height fixed and immediately returns inner content.
+        let returningOuterOffset = pivotOuterOffset - 1
+        XCTAssertEqual(model.projection(at: returningOuterOffset).displayHeight, 499)
+        XCTAssertEqual(rebased.projection(at: returningOuterOffset).displayHeight, 500)
+        XCTAssertEqual(rebased.projection(at: returningOuterOffset).offset(for: primary), 99)
+    }
+
+    func testAdaptiveParticipantAxisRebaseIsContinuousAtLowerPivot() throws {
+        let model = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [],
+                participantOrder: [primary],
+                participantSegments: [segment(primary, displayHeight: 500, start: 0, end: 100)]
+            )
+        )
+        let oldSegment = try XCTUnwrap(model.segments.first)
+        let pivotDisplayHeight: CGFloat = 300
+        let pivotOuterOffset = oldSegment.outerStart + pivotDisplayHeight - oldSegment.displayHeight
+        let oldPivot = model.projection(at: pivotOuterOffset)
+
+        let rebased = try XCTUnwrap(
+            model.rebasedAdaptiveParticipantAxis(to: pivotDisplayHeight)
+        )
+        let newPivot = rebased.projection(at: pivotOuterOffset)
+
+        XCTAssertEqual(newPivot.displayHeight, oldPivot.displayHeight)
+        XCTAssertEqual(newPivot.panelOriginY, oldPivot.panelOriginY)
+        XCTAssertEqual(newPivot.participantOffsets, oldPivot.participantOffsets)
+
+        // Moving forward from the lower pivot now consumes inner distance before raising the panel.
+        let returningOuterOffset = pivotOuterOffset + 1
+        XCTAssertEqual(model.projection(at: returningOuterOffset).displayHeight, 301)
+        XCTAssertEqual(rebased.projection(at: returningOuterOffset).displayHeight, 300)
+        XCTAssertEqual(rebased.projection(at: returningOuterOffset).offset(for: primary), 1)
+    }
+
+    func testAdaptiveParticipantAxisRebasePreservesNestedSplitSegments() throws {
+        let grandparent = ParticipantID(rawValue: 3)
+        let model = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 3,
+                detents: [],
+                participantOrder: [primary, parent, grandparent],
+                participantSegments: [
+                    segment(grandparent, displayHeight: 320, start: -10, end: 40),
+                    segment(parent, displayHeight: 320, start: 0, end: 70),
+                    segment(primary, displayHeight: 320, start: -5, end: 95),
+                    segment(parent, displayHeight: 320, start: 70, end: 140),
+                    segment(grandparent, displayHeight: 320, start: 40, end: 90)
+                ]
+            )
+        )
+        let targetDisplayHeight: CGFloat = 480
+
+        let rebased = try XCTUnwrap(
+            model.rebasedAdaptiveParticipantAxis(to: targetDisplayHeight)
+        )
+
+        XCTAssertEqual(rebased.participantOrder, model.participantOrder)
+        XCTAssertEqual(rebased.segments.map(\.owner), model.segments.map(\.owner))
+        XCTAssertEqual(rebased.segments.map(\.innerStart), model.segments.map(\.innerStart))
+        XCTAssertEqual(rebased.segments.map(\.innerEnd), model.segments.map(\.innerEnd))
+        XCTAssertEqual(
+            rebased.segments.map(\.outerStart),
+            model.segments.map { $0.outerStart + targetDisplayHeight - $0.displayHeight }
+        )
+        XCTAssertEqual(
+            rebased.segments.map(\.outerEnd),
+            model.segments.map { $0.outerEnd + targetDisplayHeight - $0.displayHeight }
+        )
+        XCTAssertTrue(rebased.segments.allSatisfy { $0.displayHeight == targetDisplayHeight })
+
+        let oldLast = try XCTUnwrap(model.segments.last)
+        let upperPivot = oldLast.outerEnd + targetDisplayHeight - oldLast.displayHeight
+        XCTAssertEqual(
+            rebased.projection(at: upperPivot).participantOffsets,
+            model.projection(at: upperPivot).participantOffsets
+        )
+        XCTAssertEqual(
+            rebased.projection(at: upperPivot).displayHeight,
+            model.projection(at: upperPivot).displayHeight
+        )
+    }
+
+    func testAdaptiveParticipantAxisRebaseRejectsFixedOrInvalidModels() throws {
+        let detentModel = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [.native(300)],
+                participantOrder: [primary],
+                participantSegments: [segment(primary, displayHeight: 300, start: 0, end: 100)]
+            )
+        )
+        XCTAssertNil(detentModel.rebasedAdaptiveParticipantAxis(to: 400))
+
+        let panelOnlyModel = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [.native(300)],
+                participantOrder: [],
+                participantSegments: []
+            )
+        )
+        XCTAssertNil(panelOnlyModel.rebasedAdaptiveParticipantAxis(to: 400))
+
+        let zeroLengthModel = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [],
+                participantOrder: [primary],
+                participantSegments: [segment(primary, displayHeight: 300, start: 0, end: 0)]
+            )
+        )
+        XCTAssertNil(zeroLengthModel.rebasedAdaptiveParticipantAxis(to: 400))
+
+        let mixedActivationModel = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [],
+                participantOrder: [primary, parent],
+                participantSegments: [
+                    segment(primary, displayHeight: 300, start: 0, end: 100),
+                    segment(parent, displayHeight: 400, start: 0, end: 100)
+                ]
+            )
+        )
+        XCTAssertNil(mixedActivationModel.rebasedAdaptiveParticipantAxis(to: 500))
+
+        let validModel = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [],
+                participantOrder: [primary],
+                participantSegments: [segment(primary, displayHeight: 300, start: 0, end: 100)]
+            )
+        )
+        XCTAssertNil(validModel.rebasedAdaptiveParticipantAxis(to: .infinity))
+        XCTAssertNil(validModel.rebasedAdaptiveParticipantAxis(to: .nan))
+
+        let emptyModel = try ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: 600,
+                displayScale: 2,
+                detents: [],
+                participantOrder: [],
+                participantSegments: []
+            )
+        )
+        XCTAssertNil(emptyModel.rebasedAdaptiveParticipantAxis(to: 400))
     }
 
     func testNestedBuilderClampsShortBouncingContentToAZeroLengthParticipant() throws {

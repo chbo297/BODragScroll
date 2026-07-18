@@ -146,7 +146,6 @@ final class LegacyDemoDragEngine: NSObject, DemoDragEngine {
         legacy.forcesInnerTopBounce = configuration.bounce.forcesInnerTopBounce
         legacy.ignoresMultipleNestedWebScrollViews = configuration.capture.ignoresMultipleNestedWebScrollViews
         legacy.disablesPanelInteractionInWebView = configuration.capture.disablesPanelInteractionInWebView
-        legacy.automaticallyShowsInnerIndicator = configuration.indicator.automaticallyShowsInnerIndicator
         legacy.defaultMovementStyle = configuration.movement.defaultStyle.legacy
         legacy.animationSpeed = configuration.movement.speed
         legacy.baseAnimationDuration = configuration.movement.baseDuration

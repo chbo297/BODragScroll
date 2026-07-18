@@ -53,7 +53,7 @@ final class PolicyParityUITests: DemoUITestCase {
     /// Every public PolicyLab combination must be selectable without changing geometry or
     /// starting a capture. Semantic motion is tested separately so this matrix does not turn
     /// harmless UIKit frame-count differences into parity failures.
-    func testAllThirtySixPolicyConfigurationsAreReachableAndStable() {
+    func testAllEighteenPolicyConfigurationsAreReachableAndStable() {
         for implementation in [DemoImplementationUnderTest.objectiveC, .swift] {
             _ = launch(scenario: .policyLab, implementation: implementation)
             let maximumHeight = dragPanel(deltaY: -app.frame.height * 0.62)
@@ -63,37 +63,34 @@ final class PolicyParityUITests: DemoUITestCase {
 
             for handoff in HandoffMode.allCases {
                 for bounce in BounceMode.allCases {
-                    for resistance in [false, true] {
-                        // Starting with false guarantees that at least one control changes for
-                        // the first combination as the Demo defaults its indicator to on.
-                        for indicator in [false, true] {
-                            XCTContext.runActivity(
-                                named: "\(implementation.rawValue)-\(handoff.label)-\(bounce.label)-r\(resistance)-i\(indicator)"
-                            ) { _ in
-                                configurePolicies(
-                                    handoff: handoff,
-                                    bounce: bounce,
-                                    resistance: resistance,
-                                    indicator: indicator
-                                )
-                                XCTAssertEqual(
-                                    readHUDSnapshot().displayHeight ?? .nan,
-                                    maximumHeight,
-                                    accuracy: 1,
-                                    "Changing a value-type policy unexpectedly changed panel geometry"
-                                )
-                                visited += 1
-                            }
+                    // Start with the non-default value so even the first combination publishes
+                    // a real configuration change without relying on a presentation-only switch.
+                    for resistance in [true, false] {
+                        XCTContext.runActivity(
+                            named: "\(implementation.rawValue)-\(handoff.label)-\(bounce.label)-r\(resistance)"
+                        ) { _ in
+                            configurePolicies(
+                                handoff: handoff,
+                                bounce: bounce,
+                                resistance: resistance
+                            )
+                            XCTAssertEqual(
+                                readHUDSnapshot().displayHeight ?? .nan,
+                                maximumHeight,
+                                accuracy: 1,
+                                "Changing a value-type policy unexpectedly changed panel geometry"
+                            )
+                            visited += 1
                         }
                     }
                 }
             }
 
-            XCTAssertEqual(visited, 36)
+            XCTAssertEqual(visited, 18)
             XCTAssertTrue(requireElement("policyTable").exists)
             XCTAssertGreaterThanOrEqual(
                 traceCount(callback: "sceneEvent", after: firstMotionSequence),
-                36,
+                18,
                 "Each matrix configuration must publish at least one policy-update event"
             )
             XCTAssertEqual(
@@ -101,8 +98,8 @@ final class PolicyParityUITests: DemoUITestCase {
                 0,
                 "Tapping policy controls must not synthesize scroll callbacks"
             )
-            attachHUDTrace("policy-36-configurations-\(implementation.rawValue)", keepAlways: true)
-            attachScreenshot("policy-36-configurations-\(implementation.rawValue)", keepAlways: true)
+            attachHUDTrace("policy-18-configurations-\(implementation.rawValue)", keepAlways: true)
+            attachScreenshot("policy-18-configurations-\(implementation.rawValue)", keepAlways: true)
         }
     }
 
@@ -228,37 +225,6 @@ final class PolicyParityUITests: DemoUITestCase {
         }
     }
 
-    /// Indicator policy is presentation-only. Both implementations must preserve the same
-    /// capture owner and geometry with it on or off. Screenshots are retained for visual review;
-    /// exact indicator fade timing is deliberately not asserted because Swift uses UIKit's public
-    /// `flashScrollIndicators()` while OC mutates private indicator subviews.
-    func testIndicatorTogglePreservesMotionParity() {
-        var observations: [String: MotionObservation] = [:]
-        for implementation in [DemoImplementationUnderTest.objectiveC, .swift] {
-            for enabled in [false, true] {
-                let key = "\(implementation.rawValue)-\(enabled)"
-                observations[key] = observeIndicator(implementation, enabled: enabled)
-            }
-        }
-
-        guard let objectiveCOff = observations["OC-false"],
-              let objectiveCOn = observations["OC-true"],
-              let swiftOff = observations["Swift-false"],
-              let swiftOn = observations["Swift-true"] else {
-            XCTFail("Missing indicator observations")
-            return
-        }
-
-        for observation in [objectiveCOff, objectiveCOn, swiftOff, swiftOn] {
-            XCTAssertEqual(observation.settledHeight, 390, accuracy: 2)
-            XCTAssertGreaterThan(observation.maximumInnerOffset, 40)
-            XCTAssertLessThanOrEqual(observation.maximumHeight, 392)
-            assertNoContainerLifecycle(in: observation.trace, context: "inner-first indicator policy")
-        }
-        XCTAssertEqual(swiftOff.settledHeight, objectiveCOff.settledHeight, accuracy: 2)
-        XCTAssertEqual(swiftOn.settledHeight, objectiveCOn.settledHeight, accuracy: 2)
-    }
-
     /// The original engine trims detents below the current detent for one capture when
     /// `forceBouncesInnerTop` is enabled. Pulling down from the middle detent must therefore
     /// bounce the table immediately instead of collapsing the panel toward the low detent.
@@ -340,7 +306,6 @@ final class PolicyParityUITests: DemoUITestCase {
             handoff: mode,
             bounce: .disabled,
             resistance: false,
-            indicator: false,
             targetHeight: 390
         )
         let baseline = latestTraceSequence
@@ -381,7 +346,6 @@ final class PolicyParityUITests: DemoUITestCase {
             handoff: .coordinated,
             bounce: mode,
             resistance: false,
-            indicator: false,
             targetHeight: 150
         )
         let baseline = latestTraceSequence
@@ -408,7 +372,6 @@ final class PolicyParityUITests: DemoUITestCase {
             handoff: .coordinated,
             bounce: .disabled,
             resistance: enabled,
-            indicator: false,
             targetHeight: nil
         )
         let baseline = latestTraceSequence
@@ -453,55 +416,11 @@ final class PolicyParityUITests: DemoUITestCase {
         )
     }
 
-    private func observeIndicator(
-        _ implementation: DemoImplementationUnderTest,
-        enabled: Bool
-    ) -> MotionObservation {
-        preparePolicyScene(
-            implementation,
-            handoff: .innerFirst,
-            bounce: .disabled,
-            resistance: false,
-            indicator: enabled,
-            targetHeight: 390
-        )
-        let baseline = latestTraceSequence
-        let markerBefore = requireElement("policy.handoff").frame.minY
-        dragVisiblePanelContent(
-            deltaY: -180,
-            visibleOffsetFromPanelTop: 220,
-            normalizedX: 0.12,
-            velocity: .slow
-        )
-        attachScreenshot(
-            "policy-indicator-\(implementation.rawValue)-\(enabled)",
-            keepAlways: true
-        )
-        let settledHeight = waitForStableDisplayHeight()
-        let markerAfter = requireElement("policy.handoff").frame.minY
-        let directInnerOffsetDelta = markerBefore - markerAfter
-        let result = motionObservation(
-            settledHeight: settledHeight,
-            after: baseline,
-            directInnerOffsetDelta: directInnerOffsetDelta
-        )
-        attachText(
-            "policy-indicator-frame-\(implementation.rawValue)-\(enabled)",
-            "markerBefore=\(markerBefore) markerAfter=\(markerAfter) delta=\(directInnerOffsetDelta)"
-        )
-        attachHUDTrace(
-            "policy-indicator-\(implementation.rawValue)-\(enabled)",
-            keepAlways: true
-        )
-        return result
-    }
-
     private func preparePolicyScene(
         _ implementation: DemoImplementationUnderTest,
         handoff: HandoffMode,
         bounce: BounceMode,
         resistance: Bool,
-        indicator: Bool,
         targetHeight: CGFloat?
     ) {
         _ = launch(scenario: .policyLab, implementation: implementation)
@@ -510,8 +429,7 @@ final class PolicyParityUITests: DemoUITestCase {
         configurePolicies(
             handoff: handoff,
             bounce: bounce,
-            resistance: resistance,
-            indicator: indicator
+            resistance: resistance
         )
         guard let targetHeight else { return }
         let delta: CGFloat
@@ -527,13 +445,11 @@ final class PolicyParityUITests: DemoUITestCase {
     private func configurePolicies(
         handoff: HandoffMode,
         bounce: BounceMode,
-        resistance: Bool,
-        indicator: Bool
+        resistance: Bool
     ) {
         setSegment(control: "policy.handoff", label: handoff.label)
         setSegment(control: "policy.bounce", label: bounce.label)
         setSwitch("policy.resistance", on: resistance)
-        setSwitch("policy.indicator", on: indicator)
     }
 
     private func setSegment(control identifier: String, label: String) {

@@ -25,6 +25,7 @@
 		988FEF42008528C8BDBF5FD2 /* DemoCatalogViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73923E1FDD650650E9093D1 /* DemoCatalogViewController.swift */; };
 		9D3BC2240659E923A6059EF2 /* ScrollingScenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */; };
 		AE213031163A0041BAE74060 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BC2A0C0CA19A2D04797C3DF /* AppDelegate.swift */; };
+		A1D0C0FFEE1234567890ABCD /* DemoContentOffsetLoggingScrollView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C0FFEE1234567890ABCE /* DemoContentOffsetLoggingScrollView.swift */; };
 		BD91AE5D378F639791324859 /* BODragScrollLegacy.h in Headers */ = {isa = PBXBuildFile; fileRef = BA3A54B63AA9A4568CBFBF2E /* BODragScrollLegacy.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C2C02A858F811D9C8065967A /* BODragScrollLegacy.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE4973D5A55C723EC65C80AB /* BODragScrollLegacy.framework */; };
 		C5D314DA0BB222A36328F8FA /* LegacyDemoDragEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6EBEA2CE99F30FAB592656C /* LegacyDemoDragEngine.swift */; };
@@ -78,6 +79,7 @@
 		2B3F0E5176BA98A5658A3767 /* BODragScrollView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = BODragScrollView.m; sourceTree = "<group>"; };
 		34C91DB1D6A73B0F51BDCDB2 /* BODragScrollDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BODragScrollDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		361AE84A2A510D8769F70738 /* DemoPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoPanelView.swift; sourceTree = "<group>"; };
+		A1D0C0FFEE1234567890ABCE /* DemoContentOffsetLoggingScrollView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoContentOffsetLoggingScrollView.swift; sourceTree = "<group>"; };
 		39E138C3E5D87CF270D672D3 /* NestedExplicitParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NestedExplicitParityUITests.swift; sourceTree = "<group>"; };
 		4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollingScenarios.swift; sourceTree = "<group>"; };
 		59E057A564BA0B1E33CEA4B5 /* WebControlsParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebControlsParityUITests.swift; sourceTree = "<group>"; };
@@ -209,6 +211,7 @@
 		B3B86B5DD9CB6E4121E97474 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				A1D0C0FFEE1234567890ABCE /* DemoContentOffsetLoggingScrollView.swift */,
 				E2F841C935D35B32CFE44DFF /* DemoDataSources.swift */,
 				361AE84A2A510D8769F70738 /* DemoPanelView.swift */,
 				8BE85FD71823C44EC2FD29E1 /* DemoScenarioViewController.swift */,
@@ -346,6 +349,7 @@
 			files = (
 				AE213031163A0041BAE74060 /* AppDelegate.swift in Sources */,
 				040D6436F4A811FF1D7F9C72 /* BasicScenarios.swift in Sources */,
+				A1D0C0FFEE1234567890ABCD /* DemoContentOffsetLoggingScrollView.swift in Sources */,
 				988FEF42008528C8BDBF5FD2 /* DemoCatalogViewController.swift in Sources */,
 				55442BBF8E0245C54E9C168D /* DemoDataSources.swift in Sources */,
 				CEC22DDF07B6C66C07FD0B88 /* DemoDragEngine.swift in Sources */,

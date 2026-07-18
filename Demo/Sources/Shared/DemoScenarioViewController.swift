@@ -368,6 +368,7 @@ class DemoScenarioViewController: UIViewController, DemoDragEngineDelegate {
             displayHeight: dragEngine.displayHeight,
             isAnimatingDisplayHeight: dragEngine.isAnimatingDisplayHeight,
             host: dragScrollView,
+            panel: panelView,
             participants: comparisonScrollViews(),
             details: details
         )

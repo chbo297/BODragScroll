@@ -405,14 +405,6 @@ public struct BODragScrollMovementPolicy: Sendable {
     }
 }
 
-public struct BODragScrollIndicatorPolicy: Sendable {
-    public var automaticallyShowsInnerIndicator: Bool
-
-    public init(automaticallyShowsInnerIndicator: Bool = true) {
-        self.automaticallyShowsInnerIndicator = automaticallyShowsInnerIndicator
-    }
-}
-
 // MARK: - Configuration
 
 /// Typed behavior configuration for `BODragScrollView`.
@@ -422,22 +414,19 @@ public struct BODragScrollConfiguration: Sendable {
     public var capture: BODragScrollCapturePolicy
     public var gesture: BODragScrollGesturePolicy
     public var movement: BODragScrollMovementPolicy
-    public var indicator: BODragScrollIndicatorPolicy
 
     public init(
         handoff: BODragScrollHandoffPolicy = .init(),
         bounce: BODragScrollBouncePolicy = .init(),
         capture: BODragScrollCapturePolicy = .init(),
         gesture: BODragScrollGesturePolicy = .init(),
-        movement: BODragScrollMovementPolicy = .init(),
-        indicator: BODragScrollIndicatorPolicy = .init()
+        movement: BODragScrollMovementPolicy = .init()
     ) {
         self.handoff = handoff
         self.bounce = bounce
         self.capture = capture
         self.gesture = gesture
         self.movement = movement
-        self.indicator = indicator
     }
 }
 

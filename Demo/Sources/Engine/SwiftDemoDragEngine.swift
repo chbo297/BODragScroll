@@ -138,7 +138,6 @@ final class SwiftDemoDragEngine: NSObject, DemoDragEngine {
         modern.movement.usesSpring = configuration.movement.usesSpring
         modern.movement.defersDisplayHeightUpdates = configuration.movement.defersDisplayHeightUpdates
         modern.movement.animatesDeferredDisplayHeightUpdates = configuration.movement.animatesDeferredDisplayHeightUpdates
-        modern.indicator.automaticallyShowsInnerIndicator = configuration.indicator.automaticallyShowsInnerIndicator
         hostView.configuration = modern
     }
 }

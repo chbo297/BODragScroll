@@ -35,6 +35,36 @@ private enum BODragScrollParticipantSegmentSource {
 private struct BODragScrollParticipantSegmentBuild {
     let segments: [ParticipantSegmentSnapshot]
     let detentHeights: [CGFloat]
+    /// Captured with the segment source so later configuration changes cannot reinterpret the
+    /// already-built axis or replace its exact free-panel endpoints.
+    let proposedRebasePolicy: BODragScrollAxisRebasePolicy
+}
+
+/// Whether a captured composite axis has a business-fixed activation height or may move its
+/// automatically generated participant block within the capture-time free-panel range.
+enum BODragScrollAxisRebasePolicy: Equatable {
+    case fixed
+    case continuousPanel
+}
+
+/// Exact correspondence between the host's legal outer offsets and their model display heights.
+/// Keeping both ranges together prevents a later configuration read or a partially rebuilt inset
+/// from pairing one phase's offset boundary with another phase's height.
+struct BODragScrollAxisEndpointAuthority: Equatable {
+    let outerOffsetRange: ClosedRange<CGFloat>
+    let displayHeightRange: ClosedRange<CGFloat>
+}
+
+/// One mathematical phase of a capture session. Its model and rebase policy are immutable; only
+/// the last successfully committed outer sample advances between scroll callbacks. The participant
+/// topology and metrics belong to the session, while an adaptive phase may be atomically replaced.
+struct BODragScrollCompositeAxisPhase {
+    let model: ScrollModel
+    let rebasePolicy: BODragScrollAxisRebasePolicy
+    /// Exact capture-time host endpoint correspondence. It is independent of whether this phase is
+    /// allowed to rebase.
+    let endpointAuthority: BODragScrollAxisEndpointAuthority
+    var lastCommittedOuterOffsetY: CGFloat
 }
 
 @MainActor
@@ -59,9 +89,10 @@ final class BODragScrollCaptureSession {
     let hierarchy: BODragScrollCaptureHierarchySnapshot
     var prioritiesByScrollViewID: [ObjectIdentifier: BODragScrollCapturePriority]
     weak var webView: UIView?
-    var model: ScrollModel?
-    /// Participant metrics changed while this touch's physical model was in use. The active
-    /// lifecycle keeps its touch-down snapshot; the next capture must build a fresh session.
+    var axisPhase: BODragScrollCompositeAxisPhase?
+    /// Participant metrics changed while this physical lifecycle was using its capture snapshot.
+    /// Adaptive phases may move an activation height, but never reinterpret these metrics; the
+    /// next capture must build a fresh session.
     var hasDeferredMetricsChange = false
 
     init(
@@ -81,6 +112,8 @@ final class BODragScrollCaptureSession {
     }
 
     var primaryParticipant: BODragScrollParticipant? { participantChain.first }
+
+    var model: ScrollModel? { axisPhase?.model }
 
     func participant(with id: ParticipantID) -> BODragScrollParticipant? {
         participantChain.first { $0.id == id }
@@ -115,8 +148,8 @@ extension BODragScrollView {
         reloadCaptureMetrics(reason: .explicitReload)
     }
 
-    /// Policy objects become visible immediately, while the composite geometry remains immutable
-    /// for the active physical lifecycle. Returns whether the reload was applied synchronously.
+    /// Policy objects become visible immediately, while the active capture keeps its topology,
+    /// metrics, and phase provenance. Returns whether the reload was applied synchronously.
     @discardableResult
     func reloadCaptureMetricsForConfigurationChange() -> Bool {
         // No dirty flag is needed here: unlike participant metrics, configuration changes never
@@ -152,7 +185,7 @@ extension BODragScrollView {
             || hostOverscrollState() != nil
     }
 
-    /// Whether an existing session is still the immutable axis of the current physical touch.
+    /// Whether an existing session still owns the stable capture topology of this physical touch.
     /// Tracking alone is insufficient because it can also be the first touch of a new lifecycle;
     /// in the continuation case the exact cleanup token still names this session generation.
     private func physicalLifecycleStillOwnsExistingCapture(
@@ -321,8 +354,9 @@ extension BODragScrollView {
                   session.hierarchy.isValid(),
                   physicalLifecycleStillOwnsExistingCapture(session) else { return false }
             // Touch-down may select another sibling chain, no participant, or a Web view. Keep the
-            // old immutable axis until UIKit confirms a real drag; the will-begin path then asks
-            // for a fresh session from this exact touched view. A tap-only touch never swaps axes.
+            // old capture and its current axis phase until UIKit confirms a real drag; the
+            // will-begin path then asks for a fresh session from this exact touched view. A tap-only
+            // touch never swaps axes.
             runtime.capture.deferredTouchViewForFreshCapture = touchedView
             return true
         }
@@ -696,7 +730,7 @@ extension BODragScrollView {
         var panelFrame = panelView?.frame ?? .zero
         panelFrame.origin.y = 0
         runtime.capture.session = nil
-        session.model = nil
+        session.axisPhase = nil
 
         if let primary = session.primaryParticipant?.scrollView {
             BODragScrollUIScrollViewBridge.unbind(
@@ -863,9 +897,10 @@ extension BODragScrollView {
         }
         participant.lastContentSize = scrollView.contentSize
         if deferCaptureMetricsReloadIfPhysicalLifecycleIsActive() {
-            // One physical lifecycle owns one immutable composite axis. Rebuilding from a
-            // projected bounce offset would reinterpret temporary geometry as a mathematical
-            // start and can fold the bounce to a boundary. Teardown reconciles against the new
+            // One physical lifecycle owns one immutable participant-metrics snapshot. Rebuilding
+            // it from a projected bounce offset would reinterpret temporary geometry as a new
+            // mathematical start and can fold the bounce to a boundary. An adaptive phase may
+            // still move the existing ranges as one unit; teardown reconciles against the new
             // standalone range, then the next touch builds a fresh session/model.
             restoreProjectionAfterDeferredParticipantMetricsChange(
                 for: participantID,
@@ -916,6 +951,17 @@ extension BODragScrollView {
             smartDetentHeights: smartCaptureDetentHeights,
             forceCurrentActivation: runtime.scrolling.isForcingMismatchRecovery
         )
+        let previousRebasePolicy = session.axisPhase?.rebasePolicy
+        let initialProposedRebasePolicy = segmentBuild.proposedRebasePolicy
+        let proposedRebasePolicy: BODragScrollAxisRebasePolicy
+        if case .mismatchRecovery = reason {
+            // Mismatch recovery deliberately synthesizes a current-height segment. Preserve the
+            // captured source's authority instead of accidentally turning an explicit/fixed model
+            // into an adaptive one merely because this rebuild used the smart continuation path.
+            proposedRebasePolicy = previousRebasePolicy ?? .fixed
+        } else {
+            proposedRebasePolicy = initialProposedRebasePolicy
+        }
         var participantSegments = segmentBuild.segments
         var captureDetentHeights = segmentBuild.detentHeights
         guard isCurrentCaptureOperation(operationEpoch),
@@ -947,6 +993,31 @@ extension BODragScrollView {
                 candidateProjection.displayHeight,
                 currentDisplayHeight
             )
+
+        let configuredMinimumDisplayHeight = effectiveMinimumDisplayHeight
+        let configuredMaximumDisplayHeight = maximumConfiguredDisplayHeight
+        let isTemporaryContinuousPanelBounce = proposedRebasePolicy == .continuousPanel
+            && (
+                currentDisplayHeight < configuredMinimumDisplayHeight
+                    && !builtModel.comparison.isValueEqual(
+                        currentDisplayHeight,
+                        configuredMinimumDisplayHeight
+                    )
+                || currentDisplayHeight > configuredMaximumDisplayHeight
+                    && !builtModel.comparison.isValueEqual(
+                        currentDisplayHeight,
+                        configuredMaximumDisplayHeight
+                    )
+            )
+        if isTemporaryContinuousPanelBounce, !compatible {
+            // The legal-clamped automatic model can preserve a panel bounce only when the captured
+            // participant offsets already describe that boundary (for example inner content is at
+            // its bottom during a bottom bounce). Otherwise continuation synthesis would either
+            // consume the bounce as inner progress or enlarge the legal host inset to the bounced
+            // height. Keep this capture panel-only; a later real capture retries after settlement.
+            deactivateCompositeModel(in: session)
+            return
+        }
 
         if !compatible, configuration.handoff.offsetMismatch == .continueFromCurrentOffset {
             segmentBuild = makeParticipantSegments(
@@ -998,33 +1069,98 @@ extension BODragScrollView {
               ensureCaptureSessionIsCurrentAndHierarchyValid(session) else {
             return
         }
-        session.model = builtModel
         let totalParticipantDistance = builtModel.segments.reduce(CGFloat.zero) {
             $0 + ($1.isParticipantSegment ? $1.outerLength : 0)
         }
         let compositeContentHeight = panelView.frame.height + totalParticipantDistance
         var compositeInsets = calculatedOuterInsets(panelHeight: panelView.frame.height)
+        var minimumEndpointDisplayHeight = effectiveMinimumDisplayHeight
+        var maximumEndpointDisplayHeight = maximumConfiguredDisplayHeight
         if let captureMinimumDisplayHeight = captureDetentHeights.first {
             // `forcesInnerTopBounce` makes the current exact detent the lower boundary for this
             // touch's composite axis. Keep the public detent list unchanged and restore its normal
             // inset when capture ends, matching the OC implementation's temporary attach-array.
             compositeInsets.top = bounds.height - captureMinimumDisplayHeight
+            minimumEndpointDisplayHeight = captureMinimumDisplayHeight
         }
         if let firstSegment = builtModel.segments.first,
            let lastSegment = builtModel.segments.last {
             // Provider-defined participant activation heights may extend beyond panel detents.
             // Make every valid model coordinate physically reachable by the outer UIScrollView.
-            compositeInsets.top = max(compositeInsets.top, -firstSegment.outerStart)
-            compositeInsets.bottom = max(
-                compositeInsets.bottom,
-                lastSegment.outerEnd + bounds.height - compositeContentHeight
-            )
+            let requiredTopInset = -firstSegment.outerStart
+            if requiredTopInset > compositeInsets.top,
+               !builtModel.comparison.isValueEqual(requiredTopInset, compositeInsets.top) {
+                compositeInsets.top = requiredTopInset
+                minimumEndpointDisplayHeight = firstSegment.displayHeight
+            }
+            let requiredBottomInset = lastSegment.outerEnd
+                + bounds.height
+                - compositeContentHeight
+            if requiredBottomInset > compositeInsets.bottom,
+               !builtModel.comparison.isValueEqual(requiredBottomInset, compositeInsets.bottom) {
+                compositeInsets.bottom = requiredBottomInset
+                maximumEndpointDisplayHeight = lastSegment.displayHeight
+            }
         }
-        var panelFrame = panelView.frame
-        panelFrame.origin.y = shouldPreserveMismatch ? state.progress : candidateProjection.panelTranslation
+        guard minimumEndpointDisplayHeight.isFinite,
+              maximumEndpointDisplayHeight.isFinite,
+              minimumEndpointDisplayHeight <= maximumEndpointDisplayHeight else {
+            deactivateCompositeModel(in: session)
+            return
+        }
+        let derivedEndpointDisplayRange = (
+            minimumEndpointDisplayHeight...maximumEndpointDisplayHeight
+        )
+        let minimumEndpointOuterOffset = -compositeInsets.top
+        let maximumEndpointOuterOffset = max(
+            compositeContentHeight + compositeInsets.bottom - bounds.height,
+            minimumEndpointOuterOffset
+        )
+        guard minimumEndpointOuterOffset.isFinite,
+              maximumEndpointOuterOffset.isFinite else {
+            deactivateCompositeModel(in: session)
+            return
+        }
+        let endpointAuthority = BODragScrollAxisEndpointAuthority(
+            outerOffsetRange: minimumEndpointOuterOffset...maximumEndpointOuterOffset,
+            displayHeightRange: derivedEndpointDisplayRange
+        )
         let finalOuterOffset = shouldPreserveMismatch
             ? state.progress + currentDisplayHeight - bounds.height
             : candidateOuterOffset
+
+        let rebasePolicy: BODragScrollAxisRebasePolicy = builtModel.isAdaptiveParticipantAxis
+            ? proposedRebasePolicy
+            : .fixed
+        session.axisPhase = BODragScrollCompositeAxisPhase(
+            model: builtModel,
+            rebasePolicy: rebasePolicy,
+            // This correspondence describes the actual insets installed immediately below.
+            // Keeping an old range while a mismatch rebuild writes new insets would split the
+            // geometry authority and could pull the new real boundary toward a stale height.
+            endpointAuthority: endpointAuthority,
+            lastCommittedOuterOffsetY: finalOuterOffset
+        )
+
+        let committedHeight: ProjectedHeight
+        if shouldPreserveMismatch {
+            // Mismatch preservation owns the currently rendered geometry, not a candidate model
+            // anchor. Publishing or deriving from candidate authority would move the panel.
+            committedHeight = .geometric(currentDisplayHeight)
+        } else {
+            committedHeight = authoritativeDisplayHeight(
+                for: candidateProjection,
+                session: session
+            ).map(ProjectedHeight.authoritative) ?? candidateProjection.height
+        }
+        var panelFrame = panelView.frame
+        panelFrame.origin.y = committedHeight.panelOriginY(
+            viewportHeight: bounds.height,
+            outerOffsetY: finalOuterOffset,
+            geometricFallback: shouldPreserveMismatch
+                ? state.progress
+                : candidateProjection.panelOriginY
+        )
 
         withInternalMutation {
             setContentInsetIfNeeded(compositeInsets)
@@ -1044,7 +1180,7 @@ extension BODragScrollView {
             // Participant setters are callback-bearing and therefore intentionally outside the
             // host's internal-mutation scope. The epoch checks below discard this old rebuild if a
             // participant delegate starts a newer capture or movement.
-            applyParticipantOffsets(candidateProjection, session: session)
+            applyParticipantOffsets(candidateProjection.participantOffsets, session: session)
         }
 
         guard isCurrentCaptureOperation(operationEpoch),
@@ -1061,13 +1197,20 @@ extension BODragScrollView {
             endCapture()
             return
         }
-        // Layout owns one final correction/publication after the complete capture rebuild. Publishing
-        // here would expose an intermediate geometry and let a reentrant movement race the old
-        // layout target. Other rebuild reasons remain self-contained and publish immediately.
+        // Layout owns the one final publication after the complete capture rebuild. Publishing here
+        // would expose an intermediate geometry and let a reentrant movement race the layout target.
+        // Other rebuild reasons read the committed geometry once and publish it immediately.
         if case .layout = reason {
             // Intentionally deferred to `layoutPanel(previousBounds:)`.
         } else {
-            setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
+            let actualDisplayHeight = displayHeightForCurrentGeometry
+            setDisplayHeight(
+                committedHeight.publishedValue(
+                    actual: actualDisplayHeight,
+                    comparison: comparisonPolicy
+                ),
+                source: .panel
+            )
         }
         _ = ensureCaptureSessionIsCurrentAndHierarchyValid(session)
     }
@@ -1099,7 +1242,7 @@ extension BODragScrollView {
                 captureSessionID: session.id
             )
         }
-        session.model = nil
+        session.axisPhase = nil
         runtime.scrolling.mismatchDirection = 0
     }
 
@@ -1140,9 +1283,31 @@ extension BODragScrollView {
             _ segments: [ParticipantSegmentSnapshot],
             source: BODragScrollParticipantSegmentSource
         ) -> BODragScrollParticipantSegmentBuild {
-            BODragScrollParticipantSegmentBuild(
+            let placementAllowsAdaptiveRebase: Bool
+            switch configuration.handoff.innerScrollPlacement {
+            case .automatic, .fromTouchedPosition:
+                placementAllowsAdaptiveRebase = true
+            case .atDisplayHeight, .afterPanelFullyDisplayed:
+                placementAllowsAdaptiveRebase = false
+            }
+            let minimumDisplayHeight = effectiveMinimumDisplayHeight
+            let maximumDisplayHeight = maximumConfiguredDisplayHeight
+            let proposedRebasePolicy: BODragScrollAxisRebasePolicy
+            if source == .smart,
+               smartDetentHeights.isEmpty,
+               placementAllowsAdaptiveRebase,
+               configuration.handoff.mode == .coordinated,
+               minimumDisplayHeight.isFinite,
+               maximumDisplayHeight.isFinite,
+               minimumDisplayHeight <= maximumDisplayHeight {
+                proposedRebasePolicy = .continuousPanel
+            } else {
+                proposedRebasePolicy = .fixed
+            }
+            return BODragScrollParticipantSegmentBuild(
                 segments: segments,
-                detentHeights: source == .smart ? smartDetentHeights : runtimeDetentHeights
+                detentHeights: source == .smart ? smartDetentHeights : runtimeDetentHeights,
+                proposedRebasePolicy: proposedRebasePolicy
             )
         }
 
@@ -1180,6 +1345,9 @@ extension BODragScrollView {
             // This value is measured from the current UIKit geometry. It never passed through an
             // Objective-C NSNumber boundary, so preserving CGFloat precision is part of its source
             // semantics (and matters when rebuilding a continuation segment at the exact position).
+            // Mismatch continuation also serves fixed/provider-defined axes whose legal segment
+            // may intentionally sit outside the configured panel range. Its provenance is restored
+            // below from the previous phase, so preserve the real continuation height here.
             displayScalar = .native(currentDisplayHeight)
         } else {
             displayScalar = automaticActivationScalar(
@@ -1282,7 +1450,11 @@ extension BODragScrollView {
     ) -> ScrollSourceScalar {
         switch configuration.handoff.innerScrollPlacement {
         case .fromTouchedPosition:
-            return .native(currentDisplayHeight)
+            return .native(
+                detentHeights.isEmpty
+                    ? legalContinuousPanelActivationHeight(from: currentDisplayHeight)
+                    : currentDisplayHeight
+            )
         case .atDisplayHeight(let height):
             // Mirrors `prefDragInnerScrollDisplayH`, which the Objective-C implementation reads
             // through NSNumber.floatValue.
@@ -1297,8 +1469,14 @@ extension BODragScrollView {
         }
 
         // An empty detent list means the panel moves continuously; it does not disable coordinated
-        // participant scrolling. Build the default segment at the touch's current display height.
-        guard !detentHeights.isEmpty else { return .native(currentDisplayHeight) }
+        // participant scrolling. Build the default segment at the touch's current *legal* display
+        // height. A panel-owned bounce is temporary extension, not a new business endpoint; folding
+        // it into the segment would enlarge the host's legal inset and make the bounce permanent.
+        guard !detentHeights.isEmpty else {
+            return .native(
+                legalContinuousPanelActivationHeight(from: currentDisplayHeight)
+            )
+        }
         let originY = panelOriginY(of: scrollView)
         let scrollHeight = max(scrollView.frame.height, 1)
         let minimumRatio = configuration.handoff.minimumInnerVisibilityRatio
@@ -1345,6 +1523,19 @@ extension BODragScrollView {
         return detentHeights.first {
             $0 + comparisonPolicy.boundaryBand >= requiredHeight
         } ?? detentHeights.last
+    }
+
+    /// Maps temporary panel bounce geometry back to the configured continuous-panel axis. This is
+    /// an exact range clamp, not a tolerance: legal intermediate heights are preserved verbatim,
+    /// while an arithmetic tail just beyond an endpoint becomes that exact endpoint naturally.
+    private func legalContinuousPanelActivationHeight(from displayHeight: CGFloat) -> CGFloat {
+        let minimum = effectiveMinimumDisplayHeight
+        let maximum = maximumConfiguredDisplayHeight
+        guard displayHeight.isFinite,
+              minimum.isFinite,
+              maximum.isFinite,
+              minimum <= maximum else { return displayHeight }
+        return min(maximum, max(minimum, displayHeight))
     }
 
     /// Mirrors the source's temporary `theattachar` suffix. The nearest detent belongs to the
@@ -1473,7 +1664,7 @@ extension BODragScrollView {
             let candidate = model.projection(at: candidateOuterOffset)
             if projection(candidate, matches: session) {
                 return CompositeState(
-                    progress: candidate.panelTranslation,
+                    progress: candidate.panelOriginY,
                     isValidPrefix: true
                 )
             }
@@ -1554,10 +1745,13 @@ extension BODragScrollView {
 
     // MARK: Projection application and native handoff
 
-    func applyParticipantOffsets(_ projection: Projection, session: BODragScrollCaptureSession) {
+    func applyParticipantOffsets(
+        _ participantOffsets: [ParticipantProjection],
+        session: BODragScrollCaptureSession
+    ) {
         let operationEpoch = runtime.capture.operationEpoch
         let scrollingCallbackEpoch = runtime.scrolling.callbackEpoch
-        for projected in projection.participantOffsets {
+        for projected in participantOffsets {
             guard runtime.capture.session === session,
                   runtime.capture.operationEpoch == operationEpoch,
                   runtime.scrolling.callbackEpoch == scrollingCallbackEpoch,

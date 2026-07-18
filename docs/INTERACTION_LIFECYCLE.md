@@ -83,7 +83,7 @@ sequenceDiagram
 | `panel` | 上次 bounds、是否完成首轮布局、待布局高度、面板替换 generation |
 | `capture` | 当前 capture session、session/ownership 序号、操作 epoch、lease 清理 |
 | `drag` | 最近一次运动来源：panel 或 participant |
-| `scrolling` | offset mismatch 方向、恢复状态、didScroll callback epoch、当前 overscroll 边/owner、指示器状态 |
+| `scrolling` | offset mismatch 方向、恢复状态、didScroll callback epoch、当前 overscroll 边/owner |
 | `transition` | movement transaction、当前 driver、拖动/减速配对、布局中断、动画监控 |
 | `interaction` | 触摸补完 recognizer、延迟 UIControl、Web 命中状态 |
 | `debug` | DEBUG-only sink 和触摸序号 |
@@ -156,7 +156,7 @@ behaviorProvider.dragScrollView(
 布局先安装一致的基础状态：
 
 ```text
-panelView.frame.minY = 0
+panelOriginY = panelView.frame.minY = 0
 outer contentSize.height = panelView.frame.height
 outer contentOffset.y = proposedDisplayHeight - bounds.height
 ```
@@ -166,9 +166,9 @@ outer contentOffset.y = proposedDisplayHeight - bounds.height
 1. 标记 panel layout ready。
 2. 取走当前 pending movement；只有进入本轮时记录的 transaction ID 精确匹配者才可标记为“已由本轮基础几何应用”，ID 不匹配的新请求会标记为未应用并在布局后正常执行。
 3. 记录 `nextTransactionID` 作为本轮 layout movement epoch。
-4. 以 `.layout` 原因重建已有 capture session 的组合模型；该 rebuild 不自行发布中间高度，最终修正和发布由外层 layout pass 统一拥有。
-5. 重建写 participant offset 时可能同步触发新 movement。epoch 未变化时，旧 layout 才可按 `proposedDisplayHeight` 修正小于一个物理像素的真实 frame 尾差。
-6. 若 epoch 前进且更新的 transaction 仍在运行，旧 layout 跳过高度发布；若该 transaction 已同步取消或结束，则仍发布当前真实几何，避免公开值停留在旧高度。
+4. 以 `.layout` 原因重建已有 capture session 的组合模型并提交一致几何；该 rebuild 不自行发布中间高度，最终回读与发布由外层 layout pass 统一拥有。
+5. participant offset 始终最后写，且 setter 可能同步触发新 movement。layout 通过 panel generation 和 transaction epoch 判断自己在回调返回后是否仍拥有发布权。
+6. 若仍拥有发布权，layout 回读一次真实几何，并用 `ProjectedHeight.authoritative(proposedDisplayHeight).publishedValue` 处理严格小于 `0.0001pt` 的算术尾差；若更新的 transaction 仍在运行则跳过旧发布。整个过程不进行第二次 frame 写入。
 7. 完成尺寸变化导致的 pending layout interruption。
 8. 执行第 2 步取走的 pending movement；provider 或其它回调中新建的请求不冒充本轮已应用意图。
 
@@ -234,8 +234,8 @@ provider 是任意同步业务代码。返回后引擎会不再询问策略地�
 - `ignoresMultipleNestedWebScrollViews == true`：从主候选到 Web 容器若发现至少两个纵向 scroll layer，结束 capture，让 Web/UIKit 自己处理。
 - 非主手势的 simultaneous 规则不会与主参与者下面的 recognizer 共存，避免 Web 内两层同时滚动。
 
-若旧减速/回弹仍拥有不可变 capture，Web 禁用、拒绝捕获或其它不兼容结果不会在 touch-down 当场拆掉
-旧轴；引擎只保存 touched view。真实 host drag 开始后才应用该结果，tap-only 则由旧轴完成结算。
+若旧减速/回弹仍拥有 capture，Web 禁用、拒绝捕获或其它不兼容结果不会在 touch-down 当场拆掉
+旧拓扑或轴阶段；引擎只保存 touched view。真实 host drag 开始后才应用该结果，tap-only 则由旧轴完成结算。
 
 ### 6.5 capture session 和独占 lease
 
@@ -254,12 +254,14 @@ provider 是任意同步业务代码。返回后引擎会不再询问策略地�
 - 在释放时恢复原值。
 
 同一条链再次捕获时优先复用 session 并刷新 `ownershipGeneration`。平稳状态会重建模型；若触摸正在
-接管旧减速/回弹 driver，则先保留当前缓存模型，避免把临时 bounce offset 误解释为新的数学起点。
+接管旧减速/回弹 driver，则先保留当前轴阶段，避免在 tracking 阶段把临时 bounce offset 误解释为新的
+数学起点。只有触摸真正进入 drag、旧 driver 已被中断后，符合连续自由面板条件的轴阶段才可能在合法
+边界上重基。
 平稳状态下链变化会完整 teardown 旧 session，再创建从 1 开始的稳定 `ParticipantID`；物理 owner
 活动时命中 sibling chain，则保持旧 session 到真实 `willBeginDragging`，再 fresh 为新链。多指 drag
 同样固定首指已建立的轴。
 
-## 7. 模型重建时机
+## 7. Capture 重建与轴阶段重基
 
 `rebuildCaptureSessionIfNeeded` 的 reason 包括：
 
@@ -272,13 +274,65 @@ provider 是任意同步业务代码。返回后引擎会不再询问策略地�
 
 每个参与者使用 KVO 观察上述 metrics，回到主队列后核对 session ID、participant ID、对象身份和 `isInternallyMutating`，再触发重建。
 
-tracking、减速、回弹或其它 active driver 正在使用本次触摸模型时，KVO 不立即重建：session 只记录一次 deferred-metrics 标记，当前物理生命周期继续使用按下时快照。若 UIKit 因 `contentSize` 收缩已先行夹回 participant offset，KVO 只用旧模型和未变的 host offset 恢复这个发生变化的 participant，不改写 host 或其它参与者，也不启动新动画。终止清理按变化后的 standalone range 使用 `forced` 语义。旧物理 owner 尚未结束时发生的新 touch-down 仍保留旧轴；只有它实际进入 `willBeginDragging`，才先中断旧 driver，再从当前 metrics 建立 fresh session。仅 tracking 后抬起不会把旧轴替换掉。这样动态列表加载/收缩不会把临时 bounce offset 折叠成新的组合轴起点。
+tracking、减速、回弹或其它 active driver 正在使用捕获时 metrics 快照时，KVO 不立即重建：session 只记录一次 deferred-metrics 标记，当前物理生命周期继续使用该快照。若 UIKit 因 `contentSize` 收缩已先行夹回 participant offset，KVO 只用当前已提交轴阶段和未变的 host offset 恢复这个发生变化的 participant，不改写 host 或其它参与者，也不启动新动画。终止清理按变化后的 standalone range 使用 `forced` 语义。旧物理 owner 尚未结束时发生的新 touch-down 仍保留旧轴；只有它实际进入 `willBeginDragging`，才先中断旧 driver，再从当前 metrics 建立 fresh session。仅 tracking 后抬起不会把旧轴替换掉。这样动态列表加载/收缩不会把临时 bounce offset 折叠成新的组合轴起点。
 
 平稳状态下，`reloadScrollMetrics()` 先更新 panel-only outer inset 并保持当前 offset，再重建当前 capture；若外部在当前物理生命周期中调用，它与 metrics KVO 一样只标记 deferred，不改写正在使用的轴。
 
 configuration、detent 和 behavior provider 变化使用独立的 `.configuration` 路径：新的配置对象、provider 和 decision revision 立即生效，但依赖它们的组合轴、inset 和 provider panel sizing 在当前物理 owner 结束前不折入旧模型。provider 变化还会暂缓普通 `layoutSubviews` 对 panel 的重算；capture teardown 后统一安排一次布局。viewport 尺寸或显式 `invalidatePanelLayout()` 属于结构性变化，会通过既有 coherent-layout interruption 立即取得所有权，不受这项延迟限制。配置变化只延迟几何，不需要额外 dirty 状态，也不把正常 settled teardown 升级为 forced。
 
-### 7.1 handoff mode
+### 7.1 连续自由面板的轴阶段重基
+
+重基不是 capture rebuild。它保留 session ID、ownership generation、参与链、层级快照、lease、KVO 和
+捕获时 metrics，只用纯模型把所有 participant segments 的激活高度平移到一个新的合法语义枢轴。
+因此 capture 拓扑在整个物理生命周期内稳定，而组合轴模型只要求在一个单调运动阶段内不可变。
+
+只有同时满足以下条件的轴阶段才标记为可自适应：
+
+- `detentHeights` 为空，面板高度连续；
+- handoff 为 `.coordinated`；
+- 参与段来自组件自动建段，而不是 behavior provider 的有效显式片段；
+- placement 为 `.automatic` 或 `.fromTouchedPosition`；
+- 参与段总长度大于零。
+
+资格保存为 `.continuousPanel`；当时真实 host offset 端点及其精确合法展示高度成对保存在 axis phase 中。
+后续配置/provider 变化不能重新解释旧阶段；mismatch recovery 继承原重基策略，但 endpoint authority
+必须由本次实际写入的 inset/contentSize 重新成对生成，不能把旧高度配给新边界。
+
+存在 detent、`.atDisplayHeight`、`.afterPanelFullyDisplayed`、有效显式片段、`.innerFirst`、
+`.innerFirstAtBoundary` 都是固定轴。session 处于 deferred metrics、offset mismatch、层级/lease 失效，
+或当前 UIKit participant offsets 与旧模型投影不一致时也 fail closed，不重基。
+
+重基只有两个入口：
+
+1. **同一次真实拖拽反向返回。** 最近一次已提交的 canonical host offset 已经位于旧参与段外至少一个
+   物理像素，本次真实 `isDragging` 位移又朝参与段返回时触发。旧模型本身已表达“位于参与段上方还是
+   下方”，无需维护额外方向状态。tracking-only 触摸和旧减速尾帧不会触发。
+2. **新真实 drag 接管减速/回弹。** `willBeginDragging` 已中断旧 driver 后，若当前合法 canonical
+   位置已经离开旧参与段至少一个物理像素，按当前位置重基；touch-down 和仅 tracking 阶段不做任何改变。
+
+“至少一个物理像素”只确认面板确实离开旧参与段：差值严格小于一个物理像素仍视为边界抖动，恰好
+一个像素已经可以触发。比较只接纳阈值相邻一个 ULP 的机器表示噪声，不引入普通误差带；它不放宽
+模型相等、终点或公开高度精度。
+
+执行时先把参考 host offset 钳到 axis phase 保存的合法 outer offset 范围。中间位置从旧模型
+投影取得合法枢轴高度；若命中 host 最小/最大端点，则直接使用 endpoint authority 的精确下/
+上端点，组合轴反算尾差不会进入新模型。随后以相同 viewport、participant 顺序和 inner ranges 构建
+候选。raw overscroll 保持不变；它只参与新旧投影的 bounce 连续性验证，不成为激活高度。候选提交前
+必须确认：
+
+- 参考点的新旧 `panelOriginY`/display height 一致；
+- 每个 participant 的 ID、offset 和顺序一致，且真实 UIKit offsets 仍匹配旧投影；
+- overscroll edge、owner、boundary 和 distance 一致；
+- session、operation epoch、层级和 lease 仍属于当前调用。
+
+验证成功后只原子替换轴阶段并推进 operation epoch；不写 `contentOffset`/frame/inset，不调用 provider、
+participant delegate 或 event delegate，也不更换 capture generation。随后当前这一次普通 `didScroll`
+用新模型投影实际 delta，使返回方向优先在当前高度消费内部范围，耗尽后才继续移动面板。
+
+普通 `didScroll` 只读取最近样本、参与段首尾和当前 delta，门控为 O(1)；只有命中上述语义拐点才按
+participant segments 数量执行 O(n) 的纯模型重建和连续性验证。重基不是逐帧行为。
+
+### 7.2 handoff mode
 
 - `.coordinated`：构建组合模型，由 host pan 驱动 panel 和 participants。
 - `.innerFirst`：capture 身份可以存在，但组合模型被停用，内部原生 pan 负责。
@@ -334,9 +388,10 @@ Touch-completion recognizer 始终允许 simultaneous。减速期间的 tap 是�
 3. 取消 touch-completion fallback。
 4. 中断当前程序化/动画 movement。
 5. 在旧减速补完和旧 movement completion 之后分别复核 window、panel 身份与 replacement generation；回调若已换掉层级，本次 begin 立即停止。
-6. 记录本次 drag 拥有的 capture session/generation，用于终止时只清理自己的 session。
-7. 只有当前模型含 participant segments 时，才把完整 drag 生命周期绑定并转发给主参与者。
-8. 依次调用主参与者 delegate `scrollViewWillBeginDragging`、组件 `eventDelegate`，并在每个外部回调边界后复核层级；若中途失效，只为已经发送的 begin 补齐对应 end。
+6. dirty、不同 sibling chain 等待处理时建立 fresh session；否则对符合条件的连续自由轴执行一次无回调重基检查。
+7. 记录本次 drag 拥有的 capture session/generation，用于终止时只清理自己的 session。
+8. 只有当前模型含 participant segments 时，才把完整 drag 生命周期绑定并转发给主参与者。
+9. 依次调用主参与者 delegate `scrollViewWillBeginDragging`、组件 `eventDelegate`，并在每个外部回调边界后复核层级；若中途失效，只为已经发送的 begin 补齐对应 end。
 
 `touchesShouldBegin` 通常已为新触摸建立或刷新模型，`willBeginDragging` 不再无条件 reload。旧物理轴
 仍被上一轮减速/回弹拥有时，dirty 模型、不同 sibling chain 或拒绝捕获等不兼容结果都只记录待捕获
@@ -352,15 +407,21 @@ Touch-completion recognizer 始终允许 simultaneous。减速期间的 tap 是�
 2. 增加 `callbackEpoch`，验证 capture 层级。
 3. 遇到非有限 offset 时恢复为有限坐标并停止本次处理。
 4. 若存在 offset mismatch 且手势正在朝可恢复方向移动，强制按当前位置重建模型。
-5. 有组合模型时对 `contentOffset.y` 做纯投影；无模型时只处理 panel bounce。
-6. `projectedState` 先把越界距离分配给 panel 或主参与者，并缓存 overscroll 的边、owner、边界与距离，再写 `panelView.frame` 和参与者 offsets；panel-owned bounce 不继承边界参与者段的固定高度目标。
-7. tracking 时根据当前 owner 在 panel rate 和主参与者 rate 之间切换 host `decelerationRate`。
-8. 发布 `displayHeight`、`didScroll` 和必要的内部指示器 flash。
+5. session clean 且当前为真实 drag 时，以 O(1) 条件检查连续自由轴是否从参与段外反向返回；命中后先完成纯模型重基。
+6. 有组合模型时对 `contentOffset.y` 做纯投影；无模型时只处理 panel bounce。
+7. `resolveScrollGeometry` 把投影与 bounce 策略解析成临时 `ResolvedScrollGeometry`，其中包含唯一的 `panelOriginY`、`ProjectedHeight`、host 修正和最终 participant offsets。
+8. `commitResolvedScrollGeometry` 在一次受保护提交中写 host 修正与 panel frame，panel 最多写一次；participant offsets 在保护范围外最后写，并在每次 callback-bearing setter 前后复核所有权。
+9. commit 成功后回读 UIKit 实际展示高度，再由 `ProjectedHeight.publishedValue` 决定本轮公开值；随后更新 overscroll、滚动速率与轴阶段采样，并发布 `displayHeight` 和 `didScroll`。
+
+协调引擎不会调用参与者的 `flashScrollIndicators()`，也不会寻找或修改 UIKit 私有指示器
+子视图。这是滚动几何的所有权边界：引擎只投影 panel 与参与者 offset，参与者自身的原生
+指示器由业务配置和 UIKit 管理；联动专用提示应作为独立 overlay 消费滚动事件实现。
 
 引擎自身原子写入产生的递归 delegate 回调会被 ownership guard 忽略；除此之外，每次
 正常进入该路径的系统 `didScroll` 都发布一次组件 `didScroll`，不使用数值或物理像素
-阈值过滤次数。`displayHeight` 按真实 `!=` 保存最新值；只有
-`didChangeDisplayHeight` 相对上次通知基线做严格数值去重，连续微小变化可以累计后触发。
+阈值过滤次数。`.geometric` 高度如实保存 UIKit 回读值；`.authoritative` 只在严格小于
+`0.0001pt` 时把算术尾差收拢到模型标准值。只有 `didChangeDisplayHeight` 相对上次通知基线
+做严格数值去重，连续微小变化可以累计后触发。
 
 每次参与者 offset 写入都可能同步调用业务 delegate，甚至触发新 movement、换 panel 或 reparent。因此写入前后反复核对：
 
@@ -376,7 +437,7 @@ Touch-completion recognizer 始终允许 simultaneous。减速期间的 tap 是�
 
 `scrollViewWillEndDragging` 从 UIKit 给出的预测 target 开始：
 
-1. 只读使用按下时建立的 active composite model；没有 capture 但有 detent 时构建 panel-only anchors 模型。
+1. 只读使用当前已经原子提交的 active axis phase model；没有 capture 但有 detent 时构建 panel-only anchors 模型。
 2. 不在 release 决策中重建模型或改写 inset/frame/participant offset；bounce/deceleration 的临时几何不能成为新模型输入。
 3. 调用纯 `TargetSolver`。无 detent 或无可用模型时保留系统预测。
 4. 将 `scrollViewWillEndDragging` 转发给本次绑定的主参与者 delegate；只接受仍在主参与者同一 segment 内的有限调整。
@@ -430,7 +491,7 @@ UIKit 在取消/中断手势时可能省略 `willEndDragging`，此时存在原�
 
 减速/回弹中出现新触摸时：
 
-- 同一捕获链且模型未 dirty 时复用 session，递增 ownership generation，保留屏幕上正在使用的缓存模型，再由 `willBeginDragging` 中断旧 transaction；模型 dirty 时 touch-down 仍不换轴，实际 drag 才在中断旧 driver 后建立 fresh session；
+- 同一捕获链且模型未 dirty 时复用 session，递增 ownership generation，保留屏幕上正在使用的轴阶段；真实进入 `willBeginDragging` 并中断旧 transaction 后，连续自由轴才可在合法枢轴重基；模型 dirty 时 touch-down 仍不换轴，实际 drag 才在中断旧 driver 后建立 fresh session；
 - 命中不同 sibling chain 或本次策略拒绝捕获时同样只保存 touched view；真实 drag 后才换轴，tap-only 和 active drag 的额外手指都不会中途替换首指模型；
 - 仅 tracking、最终没有形成 drag 的短触摸不会丢失旧回弹，tracking 结束后原 boundary return 继续；
 - 已捕获层级本身失效、panel/window 失效时强制关闭旧 owner；
@@ -478,8 +539,9 @@ movement 在以下窗口不会立刻重入：
 每个 layout pass 只消费进入本轮时记录的 transaction ID。
 
 若屏幕上的 system-scroll 请求的 target offset 与当前 offset 精确相同，UIKit 不会产生自然滚动
-回调。此时可针对该已知目标修正一次小于一个物理像素的 panel frame 尾差并复读真实几何；
-非动画、off-window 和 `.viewAnimation` 的同 offset 请求都不做这项额外收口。该逻辑不是动画结束修正。
+回调。此时自然/system-style 路径保持现有几何，只回读实际高度；若它与已知目标严格相差小于
+`0.0001pt`，仅将公开值收拢到该目标。非动画、off-window 和 `.viewAnimation` 的同 offset 请求
+继续采用各自已有的实际结果。所有路径都不追加几何修正。
 
 ### 13.3 完成监控
 
@@ -570,7 +632,7 @@ capture 永久悬挂。
 清理会先增加 operation epoch，使旧异步/同步栈失效，然后：
 
 1. 保存当前展示高度。
-2. 将 `runtime.capture.session` 和 `session.model` 清空。
+2. 将 `runtime.capture.session` 和 session 的当前轴阶段清空。
 3. 解除主参与者状态 getter 绑定。
 4. 在任何 callback-bearing participant/`scrollsToTop` 写入之前，先原子恢复完整 panel-only 几何。
 5. 失效所有 KVO observation。
@@ -578,7 +640,7 @@ capture 永久悬挂。
 7. 释放每个参与者 lease 并恢复其原 `scrollsToTop`。
 8. 最后重新发布当前 panel 展示高度。
 
-“先恢复 host 一致几何，再触碰可能回调业务的 participant”是清理的关键不变量。业务永远不应观察到 session 已为 nil、但 host 仍保留 composite contentSize/panel translation 的半状态。
+“先恢复 host 一致几何，再触碰可能回调业务的 participant”是清理的关键不变量。业务永远不应观察到 session 已为 nil、但 host 仍保留 composite contentSize/`panelOriginY` 的半状态。
 
 ### 17.2 window 移除
 
@@ -644,11 +706,13 @@ bridge 是进程级永久 getter hook，只安装一次，不提供运行时卸�
 4. 新 drag、程序化 movement、布局变化和 window removal 是否都能成对关闭旧 deceleration lifecycle？
 5. 清理是否只结束自己记录的 session/generation，而不误删回调中新建的 capture？
 6. participant 生命周期是否始终绑定同一个主参与者，而不会因目标片段属于祖先而换对象？
-7. didScroll 是否保持“panel frame 先于 participant offset”的写入顺序？
+7. didScroll 是否先完整 resolve，单次 commit 中 panel 最多写一次，再最后写 participant offset，并在成功后回读发布？
 8. 无 detent 是否仍建立 coordinated participant model，但释放不吸附？
 9. Web、UIControl、touch-completion 和 accessibility 的特殊系统时机是否仍各自只有一个 owner？
 10. movement completion 和 `didFinishMovement` 是否对每个 transaction 最多执行一次？
 11. 减速中同链新触摸、仅 tracking 的短触摸、迟到 terminal callback 是否都保持旧/新 ownership 隔离？
 12. 正常 settled teardown 是否保留真实 bounce，forced teardown 是否只作用于自己仍持有 lease 的 generation？
+13. 自适应重基是否只用于无 detent、自动 placement 的 clean coordinated session，并且没有重捕获、UIKit 写入或外部回调？
+14. 同手势重基是否要求真实 `isDragging`、至少离开旧参与段一个物理像素，并在原子替换前验证新旧正常/bounce 投影连续？
 
 UIKit 集成验证集中在 [`BODragScrollUIKitIntegrationTests.swift`](../Tests/BODragScrollTests/BODragScrollUIKitIntegrationTests.swift)，覆盖首次布局、重入、capture lease、嵌套投影、回弹、drag callback 配对、scroll-to-top、accessibility、window/析构清理和触摸补完。

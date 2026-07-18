@@ -502,19 +502,70 @@ struct ParticipantProjection: Equatable {
     let contentOffset: CGFloat
 }
 
+/// The logical display height produced by the pure composite-axis projection.
+///
+/// A geometric value belongs to continuous panel motion and must be read back from UIKit after
+/// commit. An authoritative value is a stored model anchor/participant height; it may be used to
+/// derive panel geometry directly and to remove only strict arithmetic residue when publishing.
+enum ProjectedHeight: Equatable {
+    case geometric(CGFloat)
+    case authoritative(CGFloat)
+
+    var value: CGFloat {
+        switch self {
+        case .geometric(let value), .authoritative(let value):
+            return value
+        }
+    }
+
+    var authoritativeValue: CGFloat? {
+        guard case .authoritative(let value) = self else { return nil }
+        return value
+    }
+
+    /// Resolves the one panel origin submitted to UIKit. Continuous geometry keeps the model
+    /// projection; a known height uses `panelOriginY = viewportHeight + outerOffsetY - height`
+    /// before any write.
+    func panelOriginY(
+        viewportHeight: CGFloat,
+        outerOffsetY: CGFloat,
+        geometricFallback: CGFloat
+    ) -> CGFloat {
+        guard let authoritativeValue else { return geometricFallback }
+        let resolved = viewportHeight + outerOffsetY - authoritativeValue
+        return resolved.isFinite ? resolved : geometricFallback
+    }
+
+    /// Produces the one public height after UIKit has committed geometry. Only a model-known value
+    /// may absorb strict arithmetic residue; a continuous value always reports the real readback.
+    func publishedValue(
+        actual: CGFloat,
+        comparison: ScrollComparisonPolicy
+    ) -> CGFloat {
+        guard actual.isFinite,
+              let authoritativeValue,
+              comparison.isValueEqual(actual, authoritativeValue) else {
+            return actual
+        }
+        return authoritativeValue
+    }
+}
+
 struct Projection: Equatable {
     let outerOffset: CGFloat
-    let panelTranslation: CGFloat
-    let displayHeight: CGFloat
-    /// The model-authoritative height while the outer axis is actually inside an inner-scroll
-    /// segment. Nil in the deliberate one-pixel pre-entry band and in panel-owned regions.
-    let fixedDisplayHeight: CGFloat?
+    /// Absolute panel origin in the host scroll view's content coordinate space.
+    let panelOriginY: CGFloat
+    let height: ProjectedHeight
     let activeOwner: SegmentOwner
     /// Mirrors the source's `isinnersc = (exty > 0)` decision. In particular,
     /// merely being inside the one-pixel band of a zero-length drag-inner
     /// anchor does not mean participant content is actively scrolling.
     let isParticipantScrolling: Bool
     let participantOffsets: [ParticipantProjection]
+
+    var displayHeight: CGFloat { height.value }
+
+    var authoritativeDisplayHeight: CGFloat? { height.authoritativeValue }
 
     func offset(for participantID: ParticipantID) -> CGFloat? {
         participantOffsets.first(where: { $0.participantID == participantID })?.contentOffset
@@ -530,6 +581,84 @@ struct ScrollModel: Equatable {
 
     var hasDetents: Bool { !detentDisplayHeights.isEmpty }
 
+    /// Structural half of adaptive-axis eligibility. UIKit separately preserves the capture-time
+    /// source provenance so an explicit provider model can never become adaptive by shape alone.
+    var isAdaptiveParticipantAxis: Bool {
+        guard !hasDetents,
+              let sharedDisplayHeight = segments.first?.displayHeight else { return false }
+        var totalParticipantDistance: CGFloat = 0
+        var representedParticipants = Set<ParticipantID>()
+        for segment in segments {
+            guard let participantID = segment.participantID,
+                  segment.displayHeight == sharedDisplayHeight,
+                  segment.innerLength >= 0 else { return false }
+            representedParticipants.insert(participantID)
+            totalParticipantDistance += segment.innerLength
+            guard totalParticipantDistance.isFinite else { return false }
+        }
+        return totalParticipantDistance > 0
+            && representedParticipants == Set(participantOrder)
+    }
+
+    /// Returns a new adaptive, no-detent participant axis anchored at `displayHeight`.
+    ///
+    /// This is deliberately a narrow transformation rather than a general model mutation. A
+    /// continuous free-panel interaction may move its one shared participant activation height,
+    /// but it must keep participant identity, order, and inner ranges unchanged. Rebuilding the
+    /// complete value through `ScrollModelBuilder` moves each segment's display height and outer
+    /// range together, so callers can replace the immutable model atomically.
+    ///
+    /// Models with detents, panel-owned segments, mixed activation heights, or no useful inner
+    /// distance are fixed models and fail closed. Capture-time routing provenance is checked by
+    /// the UIKit layer before it calls this pure structural primitive.
+    func rebasedAdaptiveParticipantAxis(to displayHeight: CGFloat) -> ScrollModel? {
+        guard displayHeight.isFinite,
+              !hasDetents,
+              let originalDisplayHeight = segments.first?.displayHeight else {
+            return nil
+        }
+
+        var totalParticipantDistance: CGFloat = 0
+        var representedParticipants = Set<ParticipantID>()
+        var snapshots: [ParticipantSegmentSnapshot] = []
+        snapshots.reserveCapacity(segments.count)
+
+        for segment in segments {
+            guard let participantID = segment.participantID,
+                  segment.displayHeight == originalDisplayHeight,
+                  segment.innerLength >= 0 else {
+                return nil
+            }
+            representedParticipants.insert(participantID)
+
+            let nextDistance = totalParticipantDistance + segment.innerLength
+            guard nextDistance.isFinite else { return nil }
+            totalParticipantDistance = nextDistance
+
+            snapshots.append(
+                ParticipantSegmentSnapshot(
+                    participantID: participantID,
+                    displayHeight: .native(displayHeight),
+                    innerStart: .native(segment.innerStart),
+                    innerEnd: .native(segment.innerEnd)
+                )
+            )
+        }
+
+        guard totalParticipantDistance > 0,
+              representedParticipants == Set(participantOrder) else { return nil }
+
+        return try? ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: viewportHeight,
+                displayScale: comparison.displayScale,
+                detents: [],
+                participantOrder: participantOrder,
+                participantSegments: snapshots
+            )
+        )
+    }
+
     func projection(at outerOffset: CGFloat) -> Projection {
         var offsets: [ParticipantID: CGFloat] = [:]
         var encounterOrder: [ParticipantID] = []
@@ -543,10 +672,10 @@ struct ScrollModel: Equatable {
             encounterOrder.append(id)
         }
 
-        var panelTranslation: CGFloat = 0
+        var panelOriginY: CGFloat = 0
         var activeOwner: SegmentOwner = .panel
         var isParticipantScrolling = false
-        var fixedDisplayHeight: CGFloat?
+        var authoritativeDisplayHeight: CGFloat?
 
         var iterator = segments.lazy.filter(\.isParticipantSegment).makeIterator()
         var currentSegment = iterator.next()
@@ -565,7 +694,7 @@ struct ScrollModel: Equatable {
 
             if let nextSegment, outerOffset >= nextSegment.outerStart {
                 offsets[id] = segment.innerEnd
-                panelTranslation += segment.innerLength
+                panelOriginY += segment.innerLength
                 continue
             }
 
@@ -576,7 +705,7 @@ struct ScrollModel: Equatable {
             )
             if progress > segment.innerLength {
                 offsets[id] = segment.innerEnd
-                panelTranslation += segment.innerLength
+                panelOriginY += segment.innerLength
                 continue
             }
 
@@ -584,13 +713,26 @@ struct ScrollModel: Equatable {
             // source enters the segment using `offset + onePixel >= start` and
             // therefore preserves that narrow boundary behavior.
             offsets[id] = segment.innerStart + progress
-            panelTranslation += progress
+            panelOriginY += progress
             activeOwner = segment.owner
             isParticipantScrolling = progress > 0
             if progress >= 0, segment.displayHeight.isFinite {
-                fixedDisplayHeight = segment.displayHeight
+                authoritativeDisplayHeight = segment.displayHeight
             }
             break
+        }
+
+        if authoritativeDisplayHeight == nil, hasDetents, outerOffset.isFinite {
+            // Panel anchors have zero axis length, so the participant-only traversal above cannot
+            // select them. Recognize only the exact stored coordinate or its adjacent machine
+            // representation; a real intermediate value such as 199.9 on the way to 200 remains
+            // ordinary panel geometry and is never pulled to the anchor.
+            authoritativeDisplayHeight = segments.first(where: { segment in
+                guard case .panel = segment.owner else { return false }
+                return outerOffset == segment.outerStart
+                    || outerOffset.nextUp == segment.outerStart
+                    || outerOffset.nextDown == segment.outerStart
+            })?.displayHeight
         }
 
         var orderedIDs = participantOrder
@@ -606,17 +748,16 @@ struct ScrollModel: Equatable {
         // Inside an inner segment, derive the panel frame directly from that segment's standard
         // display height. This is algebraically equivalent to accumulated participant distance but
         // avoids manufacturing a tail such as 873.0000000000001 from repeated add/subtract steps.
-        let resolvedPanelTranslation = fixedDisplayHeight.map {
+        let resolvedPanelOriginY = authoritativeDisplayHeight.map {
             viewportHeight + outerOffset - $0
-        } ?? panelTranslation
-        let resolvedDisplayHeight = fixedDisplayHeight
-            ?? (viewportHeight + outerOffset - resolvedPanelTranslation)
+        } ?? panelOriginY
+        let projectedHeight = authoritativeDisplayHeight.map(ProjectedHeight.authoritative)
+            ?? .geometric(viewportHeight + outerOffset - resolvedPanelOriginY)
 
         return Projection(
             outerOffset: outerOffset,
-            panelTranslation: resolvedPanelTranslation,
-            displayHeight: resolvedDisplayHeight,
-            fixedDisplayHeight: fixedDisplayHeight,
+            panelOriginY: resolvedPanelOriginY,
+            height: projectedHeight,
             activeOwner: activeOwner,
             isParticipantScrolling: isParticipantScrolling,
             participantOffsets: participantOffsets

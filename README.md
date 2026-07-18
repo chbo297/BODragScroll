@@ -86,7 +86,10 @@ dragScrollView.configuration = configuration
 - `capture`：响应链和 Web 内容的捕获策略。
 - `gesture`：与其它手势的失败关系和同时识别策略。
 - `movement`：系统滚动或视图动画、原项目手感阈值、时长和延迟发布策略。
-- `indicator`：进入内部滚动时是否使用公开 UIKit API提示滚动指示器。
+
+组件不会调用内部参与者的 `flashScrollIndicators()`，也不会修改 UIKit 的私有指示器子视图。
+内部滚动指示器是否显示仍由业务方配置的 `UIScrollView` 与 UIKit 原生生命周期负责；若需要
+联动专用提示，可根据 `didScroll` 的 `source` 和滚动几何绘制独立 overlay。
 
 当默认自动区间不能表达业务需求时，可由 `BODragScrollBehaviorProvider` 返回类型化的内部区间：
 
@@ -184,7 +187,7 @@ Objective-C 原实现通过 method swizzling，使被捕获内部 scroll view �
 | `BODragScrollCapture.swift` | 响应链候选、capture session、参与者链、KVO 和模型快照 |
 | `Core/BODragScrollModel.swift` | 无 UIKit 的组合滚动轴、嵌套片段构建和投影 |
 | `Core/BODragScrollTargetSolver.swift` | 无 UIKit 的松手目标和吸附求解 |
-| `BODragScrollScrolling.swift` | 高频 didScroll 投影、回弹分配、错位恢复和指示器 |
+| `BODragScrollScrolling.swift` | 高频 didScroll 投影、回弹分配和错位恢复 |
 | `BODragScrollTransition.swift` | 移动 transaction、动画、拖拽/减速生命周期和 scroll-to-top |
 | `BODragScrollInteraction.swift` | 命中测试、手势优先级、系统触摸补完和 accessibility |
 | `BODragScrollDiagnostics.swift` | DEBUG Demo 观察事件；不参与捕获、手势或滚动决策 |

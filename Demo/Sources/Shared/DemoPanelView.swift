@@ -120,14 +120,24 @@ final class DemoEventHUD: UIView {
     }
 
     func update(displayHeight: CGFloat, source: String, event: String, trace: String) {
-        heightLabel.text = String(format: "displayHeight  %6.1f   ·   %@", displayHeight, source)
-        eventLabel.text = event
-        accessibilityLabel = String(
+        let heightText = String(format: "displayHeight  %6.1f   ·   %@", displayHeight, source)
+        if heightLabel.text != heightText {
+            heightLabel.text = heightText
+        }
+        if eventLabel.text != event {
+            eventLabel.text = event
+        }
+        let accessibilityLabel = String(
             format: "展示高度 %.6f，运动来源 %@，%@",
             displayHeight,
             source,
             event
         )
-        accessibilityValue = trace
+        if self.accessibilityLabel != accessibilityLabel {
+            self.accessibilityLabel = accessibilityLabel
+        }
+        if accessibilityValue != trace {
+            accessibilityValue = trace
+        }
     }
 }

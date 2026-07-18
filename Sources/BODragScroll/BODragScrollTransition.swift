@@ -842,45 +842,29 @@ private extension BODragScrollView {
             // off-window and UIView-animation requests deliberately keep their original behavior.
             let needsNaturalNoScrollHandling = displayHeight != resolvedDisplayHeight
                 || displayHeightForCurrentGeometry != resolvedDisplayHeight
+            var finalDisplayHeight = displayHeightForCurrentGeometry
             if needsNaturalNoScrollHandling,
                animated,
                window != nil,
-               !runtime.capture.isSuspendedForWindowTransition {
-                let styleState = decisionStateToken()
-                let style = resolvedMovementStyle(
-                    requested: options.style,
-                    fromDisplayHeight: displayHeight,
-                    toDisplayHeight: resolvedDisplayHeight,
-                    reason: transaction.reason
-                )
-                guard runtime.transition.activeTransaction === transaction,
-                      decisionStateToken() == styleState else {
-                    if runtime.transition.activeTransaction === transaction {
-                        finishActiveMovement(
-                            transactionID: transaction.id,
-                            outcome: .cancelled,
-                            finalDisplayHeight: displayHeightForCurrentGeometry
-                        )
-                    }
-                    return displayHeight
-                }
-                if !style.isViewAnimation {
-                    withInternalMutation {
-                        correctDisplayHeightResidual(to: resolvedDisplayHeight)
-                    }
-                    guard runtime.transition.activeTransaction === transaction else {
-                        return resolvedDisplayHeight
-                    }
-                    setDisplayHeight(displayHeightForCurrentGeometry, source: .panel)
-                    guard runtime.transition.activeTransaction === transaction else {
-                        return resolvedDisplayHeight
-                    }
+               !runtime.capture.isSuspendedForWindowTransition,
+               options.style != .viewAnimation {
+                // There is no animation to style when the host offset is already equal. Avoid a
+                // policy callback and preserve the real frame; only the strict arithmetic tail of
+                // this natural/system-style terminal value is canonicalized for publication.
+                finalDisplayHeight = ProjectedHeight.authoritative(resolvedDisplayHeight)
+                    .publishedValue(
+                        actual: finalDisplayHeight,
+                        comparison: comparisonPolicy
+                    )
+                setDisplayHeight(finalDisplayHeight, source: .panel)
+                guard runtime.transition.activeTransaction === transaction else {
+                    return resolvedDisplayHeight
                 }
             }
             finishActiveMovement(
                 transactionID: transaction.id,
                 outcome: .completed,
-                finalDisplayHeight: displayHeightForCurrentGeometry
+                finalDisplayHeight: finalDisplayHeight
             )
             return resolvedDisplayHeight
         }
@@ -1047,8 +1031,8 @@ private extension BODragScrollView {
             && captureSessionMatches(captureOwnership)
             && (nativeState.isTracking || nativeState.isDecelerating)
         if !defersCaptureRelease {
-            // Panel-to-panel drag replacement never crosses a participant segment. The
-            // touch-down model is therefore already the authoritative terminal projection;
+            // Panel-to-panel drag replacement never crosses a participant segment. The current
+            // axis phase is therefore already the authoritative terminal projection;
             // reloading here would falsely mark this still-owned session as metrics-dirty.
             finishCaptureAfterMovementIfNeeded(
                 disposition: finished ? .settled : .forced
@@ -1550,9 +1534,9 @@ private extension BODragScrollView {
             )
         }
 
-        // Release targeting is a read-only decision over the model captured at touch-down. A
-        // rebuild here would derive a new model from live bounce/deceleration offsets and mutate
-        // the geometry while UIKit is merely asking for a target.
+        // Release targeting is a read-only decision over the current axis phase. Any adaptive
+        // rebase has already happened in did-scroll; rebuilding here from live bounce/deceleration
+        // offsets would mutate geometry while UIKit is merely asking for a target.
         let resolutionState = decisionStateToken()
 
         guard let model = releaseTargetModel(), !model.segments.isEmpty else {
@@ -2100,6 +2084,15 @@ extension BODragScrollView: UIScrollViewDelegate {
                 finishInvalidatedDragBegin()
                 return
             }
+        }
+        // A clean same-chain capture keeps its leases and metric snapshots when it interrupts
+        // deceleration. For an adaptive no-detent axis, silently move only the automatic inner
+        // activation block to the currently rendered legal height before begin callbacks observe
+        // the new drag. Dirty or different-chain captures were rebuilt by the branch above.
+        rebaseAdaptiveAxisForNewDragIfNeeded()
+        guard dragEntryIsStillValid() else {
+            finishInvalidatedDragBegin()
+            return
         }
         armCaptureCleanupOwnership()
         let forwardedParticipant = hasParticipantSegments ? primaryParticipantScrollView : nil

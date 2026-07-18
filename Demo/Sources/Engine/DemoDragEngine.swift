@@ -181,16 +181,11 @@ struct DemoMovementConfiguration {
     var animatesDeferredDisplayHeightUpdates = false
 }
 
-struct DemoIndicatorConfiguration {
-    var automaticallyShowsInnerIndicator = true
-}
-
 struct DemoEngineConfiguration {
     var handoff = DemoHandoffConfiguration()
     var bounce = DemoBounceConfiguration()
     var capture = DemoCaptureConfiguration()
     var movement = DemoMovementConfiguration()
-    var indicator = DemoIndicatorConfiguration()
 }
 
 @MainActor

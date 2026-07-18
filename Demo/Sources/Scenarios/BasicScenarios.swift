@@ -356,10 +356,11 @@ final class MovementLabViewController: DemoScenarioViewController {
     private let styleControl = UISegmentedControl(items: ["自动", "系统", "View"])
     private let nonSnappingSwitch = UISwitch()
     private let resultLabel = DemoControlFactory.valueLabel("尚未发起程序化移动")
-    private let controlsScrollView = UIScrollView()
+    private let controlsScrollView: DemoContentOffsetLoggingScrollView
     private var latestViewportSize = CGSize.zero
 
     init(implementation: DemoImplementation = .swift) {
+        controlsScrollView = DemoContentOffsetLoggingScrollView(implementation: implementation)
         super.init(
             title: "吸附与程序化移动",
             subtitle: "detent、nonSnappingRanges 与 movement transaction",
@@ -407,6 +408,7 @@ final class MovementLabViewController: DemoScenarioViewController {
     }
 
     override func configureContent(in contentView: UIView) {
+        controlsScrollView.diagnosticHostScrollView = dragScrollView
         styleControl.selectedSegmentIndex = 0
         styleControl.accessibilityIdentifier = "movement.style"
         nonSnappingSwitch.accessibilityIdentifier = "movement.range"

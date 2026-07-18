@@ -10,6 +10,7 @@ private struct DemoTraceScrollSnapshot: Codable, Sendable {
     let contentHeight: Double
     let boundsWidth: Double
     let boundsHeight: Double
+    let presentationOffsetY: Double
     let isTracking: Bool
     let isDragging: Bool
     let isDecelerating: Bool
@@ -23,9 +24,36 @@ private struct DemoTraceScrollSnapshot: Codable, Sendable {
         contentHeight = Self.finite(scrollView.contentSize.height)
         boundsWidth = Self.finite(scrollView.bounds.width)
         boundsHeight = Self.finite(scrollView.bounds.height)
+        presentationOffsetY = Self.finite(
+            (scrollView.layer.presentation() ?? scrollView.layer).bounds.origin.y
+        )
         isTracking = scrollView.isTracking
         isDragging = scrollView.isDragging
         isDecelerating = scrollView.isDecelerating
+    }
+
+    private static func finite(_ value: CGFloat) -> Double {
+        value.isFinite ? Double(value) : 0
+    }
+}
+
+private struct DemoTracePanelSnapshot: Codable, Sendable {
+    let frameMinY: Double
+    let centerY: Double
+    let layerPositionY: Double
+    let presentationFrameMinY: Double
+    let presentationVisualMinY: Double
+
+    init(panelView: UIView, host: UIScrollView) {
+        let panelLayer = panelView.layer.presentation() ?? panelView.layer
+        let hostLayer = host.layer.presentation() ?? host.layer
+        frameMinY = Self.finite(panelView.frame.minY)
+        centerY = Self.finite(panelView.center.y)
+        layerPositionY = Self.finite(panelView.layer.position.y)
+        presentationFrameMinY = Self.finite(panelLayer.frame.minY)
+        presentationVisualMinY = Self.finite(
+            panelLayer.frame.minY - hostLayer.bounds.origin.y
+        )
     }
 
     private static func finite(_ value: CGFloat) -> Double {
@@ -42,6 +70,7 @@ private struct DemoTraceEvent: Codable, Sendable {
     let displayHeight: Double
     let isAnimatingDisplayHeight: Bool
     let host: DemoTraceScrollSnapshot
+    let panel: DemoTracePanelSnapshot?
     let participants: [DemoTraceScrollSnapshot]
     let details: [String: String]
 }
@@ -61,6 +90,10 @@ private struct DemoTraceBatch: Codable, Sendable {
 final class DemoTraceRecorder {
     private let scene: String
     private let implementation: String
+    /// UI tests read the complete textual trace through accessibility. Manual comparison runs use
+    /// the console batches instead, so building and republishing an ever-growing accessibility
+    /// string on every scroll sample would only perturb the interaction being diagnosed.
+    private let exposesLiveAccessibilityTrace: Bool
     private let startTime = CACurrentMediaTime()
     private let outputQueue = DispatchQueue(label: "com.chbo297.BODragScrollDemo.trace-output")
     private var events: [DemoTraceEvent] = []
@@ -70,6 +103,9 @@ final class DemoTraceRecorder {
     init(scene: String, implementation: DemoImplementation) {
         self.scene = scene
         self.implementation = implementation.displayName
+        exposesLiveAccessibilityTrace = ProcessInfo.processInfo.environment[
+            "BODRAGSCROLL_UI_TESTING"
+        ] == "1"
     }
 
     var accessibilityValue: String {
@@ -81,6 +117,7 @@ final class DemoTraceRecorder {
         displayHeight: CGFloat,
         isAnimatingDisplayHeight: Bool,
         host: UIScrollView,
+        panel: UIView?,
         participants: [(name: String, scrollView: UIScrollView)],
         details: [String: String] = [:]
     ) {
@@ -93,12 +130,14 @@ final class DemoTraceRecorder {
             displayHeight: displayHeight.isFinite ? Double(displayHeight) : 0,
             isAnimatingDisplayHeight: isAnimatingDisplayHeight,
             host: DemoTraceScrollSnapshot(name: "host", scrollView: host),
+            panel: panel.map { DemoTracePanelSnapshot(panelView: $0, host: host) },
             participants: participants.map {
                 DemoTraceScrollSnapshot(name: $0.name, scrollView: $0.scrollView)
             },
             details: details
         )
         events.append(event)
+        guard exposesLiveAccessibilityTrace else { return }
         if !encodedAccessibilityTrace.isEmpty {
             encodedAccessibilityTrace.append("\n")
         }

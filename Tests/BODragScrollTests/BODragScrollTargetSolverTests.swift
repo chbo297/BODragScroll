@@ -15,7 +15,7 @@ final class BODragScrollTargetSolverTests: XCTestCase {
         XCTAssertFalse(decision.bypassedSnapping)
     }
 
-    func testKnownBoundaryTargetKeepsCanonicalHeightDespiteCompositeArithmeticTail() throws {
+    func testKnownPanelBoundaryKeepsCanonicalHeightAcrossProjectionAndTargetSolving() throws {
         let model = try ScrollModelBuilder.build(
             from: ScrollModelSnapshot(
                 viewportHeight: 640,
@@ -29,8 +29,9 @@ final class BODragScrollTargetSolverTests: XCTestCase {
         )
         let participant = try XCTUnwrap(model.segments.first(where: \.isParticipantSegment))
         let panelAnchor = try XCTUnwrap(model.segments.last)
-        let projectedHeight = model.projection(at: panelAnchor.outerStart).displayHeight
-        XCTAssertNotEqual(projectedHeight, panelAnchor.displayHeight)
+        let projection = model.projection(at: panelAnchor.outerStart)
+        XCTAssertEqual(projection.authoritativeDisplayHeight, panelAnchor.displayHeight)
+        XCTAssertEqual(projection.displayHeight, panelAnchor.displayHeight)
 
         let decision = TargetSolver.solve(
             input(

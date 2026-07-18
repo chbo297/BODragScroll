@@ -20,7 +20,7 @@ Core 两个文件只依赖 Foundation，不持有 `UIView`、`UIScrollView`、�
 | --- | --- | --- |
 | `V` | `model.viewportHeight` / `bounds.height` | 外层 `BODragScrollView` 可视高度 |
 | `Y` | `outerOffset` / `contentOffset.y` | 组合轴当前外层偏移 |
-| `T` | `panelTranslation` / `panelView.frame.minY` | 面板因内部滚动累计而向下平移的距离 |
+| `P` | `panelOriginY` / `panelView.frame.minY` | 面板顶部在 host content 坐标中的绝对纵坐标 |
 | `H` | `displayHeight` | 面板当前实际可见高度 |
 | `D` | `accumulatedParticipantDistance` | 当前片段之前，所有参与者已经占用的组合轴长度 |
 
@@ -28,13 +28,13 @@ Core 两个文件只依赖 Foundation，不持有 `UIView`、`UIScrollView`、�
 
 ```text
 H = V - (panelView.frame.minY - contentOffset.y)
-  = V + Y - T
+  = V + Y - P
 ```
 
 这也是 `BODragScrollView.displayHeightForCurrentGeometry` 与 `ScrollModel.projection(at:)` 共同遵守的公式。
 
-- 面板自己运动时，`T` 不变，`Y` 每增加 1，`H` 增加 1。
-- 内部参与者运动时，`Y` 和 `T` 同时增加相同距离，`H` 保持不变。
+- 面板自己运动时，`P` 不变，`Y` 每增加 1，`H` 增加 1。
+- 内部参与者运动时，`Y` 和 `P` 同时增加相同距离，`H` 保持不变。
 - 没有组合模型时，面板 frame 的正常原点是 0，因此 `H = V + Y`。
 
 ## 2. 模型中的两类片段
@@ -80,8 +80,8 @@ b = a + L
 
 ```text
 participantOffset = u0 + q
-T = D_before + q
-H = V + Y - T = Hs
+P = D_before + q
+H = V + Y - P = Hs
 ```
 
 因此“面板停住、内部继续滚”不是两个手势之间临时转移距离，而是同一条外层轴上的一段确定映射。
@@ -117,7 +117,7 @@ flowchart LR
 `ScrollModel.projection(at:)` 返回 `Projection`：
 
 - 外层偏移；
-- 面板平移量和展示高度；
+- 面板绝对原点 `panelOriginY` 和 `ProjectedHeight`；
 - 当前活动 owner；
 - 当前是否真的在滑参与者；
 - 所有参与者此刻应该具有的 `contentOffset.y`。
@@ -126,16 +126,17 @@ flowchart LR
 
 1. 每个参与者第一次出现时，以其第一段的 `innerStart` 初始化 offset。
 2. 只遍历参与者片段。
-3. 位于 `Y` 之前的完整片段被设置到 `innerEnd`，其长度全部累加到 `T`。
+3. 位于 `Y` 之前的完整片段被设置到 `innerEnd`，其长度全部累加到 `P`。
 4. 命中的当前片段使用 `q = Y - outerStart` 计算部分进度。
 5. 后续片段保持各自尚未消费时的初始 offset。
 6. 真正进入参与者片段后，直接采用该片段的标准 `displayHeight`，再由
-   `T = V + Y - H` 反推 panel translation；panel 区间和预进入区仍使用
-   `H = V + Y - T`。
+   `P = V + Y - H` 反推 `panelOriginY`；panel 区间和预进入区仍使用
+   `H = V + Y - P`。
 
-参与者片段内的 `displayHeight` 是模型权威值。直接使用它，可以避免相同高度经过多次
-加减后变成 `873.0000000000001`。这里不是把任意结果“显示成”标准值：panel frame
-仍按解析式真实写入，公开高度随后仍从真实几何读回。
+`Projection.height` 使用 `ProjectedHeight` 区分两种语义：`.geometric` 属于连续面板运动，
+提交后必须使用 UIKit 真实回读；`.authoritative` 来自模型保存的锚点、参与者标准高度或精确
+host 端点，可在写入前直接解析 `panelOriginY`。它避免相同高度经过多次加减后变成
+`873.0000000000001`，但不会把任意邻近值吸到模型高度。
 
 当同一个祖先在 child 前后拥有两个片段时，第 1 步尤其重要：后一个片段不能提前覆盖前一个片段已经投影出的部分进度。
 
@@ -229,6 +230,22 @@ activationHeight = currentDisplayHeight
 无 detent 时，显式调用 `settleToNearestDetent` 同样是 no-op：不创建 movement
 transaction，也不调用 completion。
 
+#### 5.2.1 连续自由轴为什么允许重基
+
+无 detent、`.coordinated`、自动建段，且 placement 为 `.automatic` 或
+`.fromTouchedPosition` 时，激活高度表达的是“本阶段优先消费内部滚动的面板高度”，不是业务固定锚点。
+如果面板已经离开旧参与段，又在同一次真实拖拽中反向返回，继续使用旧激活高度会要求面板先退回触摸
+起点才重新消费内部范围。新的真实 drag 接管旧减速/回弹时也存在同样问题。
+
+因此这类模型在捕获时保存 `.continuousPanel` 重基策略；每个 axis phase 另行成对保存当时精确的 host
+offset 端点与其最小/最大合法展示高度，端点数值权威与是否允许重基相互独立。其它模型均为 `.fixed`。存在 detent、provider 有效显式片段、`.atDisplayHeight`、
+`.afterPanelFullyDisplayed`、非 coordinated handoff、零总长度参与段，或 session 处于 metrics dirty、
+offset mismatch、层级/lease 失效时，不允许重基。
+
+首次 capture 若发生在连续面板的临时 panel bounce 中，自动激活高度先钳到合法端点。只有当前参与者
+offset 已能与该端点模型连续表示（例如底部 bounce 时内部也已到底）才建立组合轴并保留真实 bounce；
+否则本次保持 panel-only，避免把 bounce 距离吃成内部进度或扩大为新的合法 inset。
+
 ### 5.3 显式片段
 
 `BODragScrollBehaviorProvider.segmentsFor` 返回的 `BODragScrollInnerScrollSegment` 经过以下处理：
@@ -299,7 +316,7 @@ outer contentSize.height
     = panelView.frame.height + 所有参与者片段长度之和
 
 panelView.frame.minY
-    = projection.panelTranslation
+    = projection.panelOriginY
 
 outer contentOffset.y
     = projection 对应的组合轴位置
@@ -307,53 +324,83 @@ outer contentOffset.y
 
 若 provider 指定的激活高度超出普通 detent 范围，外层 `contentInset.top/bottom` 会扩展，使模型中第一到最后一个坐标都可实际到达。
 
-普通 capture rebuild 成功安装后会自行发布真实高度；`.layout` rebuild 只负责形成模型和几何，
-最终修正与发布交回外层 layout pass，避免业务看到中间状态。participant setter 的同步回调若创建
-新 transaction，layout 通过 transaction epoch 放弃旧目标修正；只有更新的 transaction 仍在运行
-时才让其继续拥有发布权，若它已同步取消或结束，layout 仍发布当前真实几何。
+普通 capture rebuild 成功安装后会回读并发布最终高度；`.layout` rebuild 只负责形成模型和几何，
+最终回读与发布交回外层 layout pass，避免业务看到中间状态。participant setter 的同步回调若创建
+新 transaction，layout 通过 transaction epoch 放弃旧发布权；若新 transaction 已同步取消或结束，
+layout 仍发布当前最终几何。两条路径都不会在 commit 后再次改写 panel frame。
+
+### 7.1 同一 capture 内的纯轴重基
+
+自适应连续轴的重基只改变模型中所有 participant segments 的共同 `displayHeight`，保留：
+
+- viewport 与合法 outer 边界长度；
+- participant ID、顺序、inner ranges 和每段长度；
+- capture session、层级快照、lease、KVO 与捕获时 metrics。
+
+同拖拽入口使用最近一次已提交的 host offset：先钳到模型合法范围，再判断它是否已经离开旧参与段至少
+一个物理像素、当前 delta 是否朝旧参与段返回。旧模型的 canonical 位置已经表达返回方向，不存储独立
+方向状态。新真实 drag 入口在中断旧 driver 后使用当前 canonical offset，不接受仅 tracking 的触摸。
+
+候选模型以旧模型在 canonical 参考点投影出的合法 `displayHeight` 为新激活高度；若参考点是 host
+最小/最大合法端点，则直接使用 capture-time endpoint authority 的精确高度端点，避免把组合轴反算产生的
+`873.0000000000001` 固化进新阶段。中间连续位置不吸附、不取整，仍使用真实投影。raw host overscroll
+不参与激活高度计算，也不会被修改；它只用于核对新旧模型在相同实际 offset 上的 bounce edge、owner、
+boundary 和 distance 是否连续。候选还必须在参考点保持 `panelOriginY`/display height、participant
+ID/offset 顺序按模型数值语义一致，并确认 UIKit 真实 participant offsets 尚未偏离旧投影。
+
+验证通过后，以 operation epoch 保护原子替换当前轴阶段；该操作不写 host/participant offset、frame、
+inset，不调用 provider/delegate，也不改变 session generation。随后的普通 `didScroll` 才把本次实际
+delta 投影到新模型。因此重基点本身没有视觉跳变，也不会凭空产生额外系统回调。
+
+普通帧只读取阶段来源、首尾参与段、最近 offset 和当前 delta，复杂度 O(1)。只有命中反向语义拐点
+或新真实 drag 接管时，才按片段数量 O(n) 构建并验证候选；不是逐帧重算。
 
 ## 8. 高频滚动与回弹分配
 
-正常区间内，`scrollViewDidScroll` 只做：
+正常区间内，`scrollViewDidScroll` 使用固定管线：
 
 ```text
 Projection = model.projection(contentOffset.y)
-panelView.frame.minY = Projection.panelTranslation
-每个 participant.contentOffset.y = Projection 中对应值
+ResolvedScrollGeometry = resolve(Projection + bounce policy)
+commit(host correction + panelOriginY，panel 最多写一次)
+commit(每个 participant.contentOffset.y，始终最后写)
+actualHeight = readBackUIKitGeometry()
+publishedHeight = ProjectedHeight.publishedValue(actualHeight)
 ```
 
-写入顺序固定为“先面板 frame，再参与者 offset”。某些 UIKit scroll 子类会在布局时自行校正 offset，反过来写容易制造旧几何回调。
+`ResolvedScrollGeometry` 是一次回调内的临时值，不持久保存，也不形成第二套渲染状态。host 修正和
+panel 属于同一次受保护 commit；participant setter 可能同步进入业务 delegate，因此放在保护范围外最后
+执行，并在前后复核 session、operation epoch、callback epoch、panel 与层级身份。
 
-### 8.1 已知目标的真实 frame 尾差修正
+### 8.1 已知高度的解析与发布
 
-仅在目标高度有明确权威来源时（例如参与者段标准高度、layout proposed height 或 resolved
-programmatic target），第一次 frame 写入后才复读真实几何；真实高度与目标的残差严格小于一个
-物理像素时，可对 frame 做一次修正，随后仍以真实几何作为公开 `displayHeight`。调用场景是：
+`.authoritative` 高度在任何 UIKit setter 前通过 `H = V + Y - P` 绝对解析唯一的 `panelOriginY`；
+`.geometric` 高度保留连续投影原点。commit 后只回读一次真实几何：若权威高度与真实值相差严格小于
+`0.0001pt`，公开值使用精确权威高度；否则保留真实值，暴露模型或布局偏差。整个过程不进行第二次
+frame 写入。
 
-1. 正常固定高度参与者段与 inner-owned bounce；
-2. `.layout` capture rebuild 完成，且外层 layout 仍持有原 transaction epoch；
-3. 屏幕上的 system-scroll 程序化移动，其 target offset 与当前 offset 精确相同，UIKit 不会产生自然滚动回调。
+layout、capture rebuild 和无滚动回调的已知程序化终点复用同一 `ProjectedHeight` 发布语义，但各自
+保持自己的生命周期提交边界。动画结束只采用 UIKit 的实际 offset 和几何结果，不追加 offset/frame
+修正。
 
-一个物理像素只是允许尝试修正的准入边界，不表示公开高度可以保留一个像素误差。非动画同 offset
-移动不额外收口；panel-owned bounce 也不使用固定高度修正；动画结束后更不会再次改写 offset/frame。
+外层 offset 超过 `[minimumOuterOffset, maximumOuterOffset]` 时，`resolveScrollGeometry` 以纯计算方式分配 overscroll。若某种策略要求钳制 host，它只在结果中返回 `correctedOuterOffsetY`，由正常 `scrollViewDidScroll` owner 在同一次 commit 中执行；metrics 恢复等旁路调用不会暗中修改 host：
 
-外层 offset 超过 `[minimumOuterOffset, maximumOuterOffset]` 时，`BODragScrollScrolling.projectedState` 以纯计算方式分配 overscroll。若某种策略要求钳制 host，它只在结果中返回 `correctedOuterOffsetY`，由正常 `scrollViewDidScroll` owner 执行写入；metrics 恢复等旁路调用不会暗中修改 host：
-
-- 若策略选择 panel，参与者 offsets 和 panel translation/frame 保持边界值，清除 `fixedDisplayHeight`，令 `activeOwner = panel`、`isParticipantScrolling = false`；顶部展示高度为 `boundaryHeight - extensionDistance`，底部为 `boundaryHeight + extensionDistance`。因此即使距离小于一个物理像素，也不会被参与者段修正拉回边界。
-- 若策略选择内部且主参与者允许 bounce，额外距离加到主参与者 offset，并同步调整 panel translation；该路径保留边界投影已有的 `fixedDisplayHeight`（若存在），使真实展示高度保持边界值。
+- 若策略选择 panel，参与者 offsets 和 `panelOriginY` 保持边界值，使用 `.geometric` 高度；顶部展示高度为 `boundaryHeight - extensionDistance`，底部为 `boundaryHeight + extensionDistance`。因此即使距离小于一个物理像素，也不会被参与者段拉回边界。
+- 若策略选择内部且主参与者允许 bounce，额外距离加到主参与者 offset，并同步调整 `panelOriginY`；该路径保留边界投影已有的 `.authoritative` 高度，使真实展示高度保持边界值。
 - 若策略选择内部但参与者不允许 bounce，外层 offset 被钳回边界。
 - `forcesInnerTopBounce` 会覆盖普通顶部 owner 偏好。
 
-host 始终是组合滚动的唯一物理 driver。`scrolling.overscroll` 只缓存当前边、owner、标准边界和真实距离；participant 即使显示内部 bounce，也只是 host offset 的投影结果，不单独启动第二套减速。释放目标只读使用按下时的缓存模型，不会从临时 bounce offset 重建数学轴。
+host 始终是组合滚动的唯一物理 driver。`scrolling.overscroll` 只缓存当前边、owner、标准边界和真实距离；participant 即使显示内部 bounce，也只是 host offset 的投影结果，不单独启动第二套减速。释放目标只读使用当前已提交轴阶段，不会从临时 bounce offset 重建数学轴。自适应重基若发生在 bounce 中，也只用钳到合法边界后的 canonical 投影选择高度，并要求 raw overscroll 的新旧分配完全连续。
 
 participant 的 `contentSize/contentInset/adjustedContentInset` 若在该物理生命周期中改变，只标记当前
 session 的 metrics 已过期，不在 tracking/deceleration/bounce 中重建。若 UIKit 因内容收缩同步夹回
 participant offset，则以旧模型在当前 host offset 的投影只恢复发生变化的 participant；host 和其它
 参与者保持不动。旧模型负责把本次运动完整结算，清理使用新 standalone range。旧 owner 期间的新
-touch-down 即使命中不同 sibling chain 也不换轴；实际进入新 drag 后才用当前 metrics 和 touched view
-创建 fresh session，仅 tracking 则仍由旧模型结算。
+touch-down 即使命中不同 sibling chain 也不换轴；实际进入新 drag 后，dirty 或不同链状态才用当前
+metrics 和 touched view 创建 fresh session。clean 同链保留捕获快照，自适应连续轴可在合法枢轴重基；
+仅 tracking 则仍由当前轴阶段结算。
 
-configuration、detent 或 behavior provider 改变时，新的策略对象立即参与后续决策，但旧物理生命周期的组合轴、inset 与 panel sizing 保持不可变；capture 结束后再用 `.configuration` 原因重建/布局。显式布局失效和 viewport 改变是结构性事件，可以主动中断并立即重算。
+configuration、detent 或 behavior provider 改变时，新的策略对象立即参与后续决策，但旧物理生命周期的捕获拓扑、metrics、inset 与 panel sizing 保持不可变；capture 结束后再用 `.configuration` 原因重建/布局。这里允许的自适应重基只平移既有自动参与段，不折入新配置或新 metrics。显式布局失效和 viewport 改变是结构性事件，可以主动中断并立即重算。
 
 若 UIKit 在 `didEndDragging(false)` 或 `didEndDecelerating` 后仍留下真实 host overscroll，Transition 保留 capture，让 host 回到标准边界；逐帧仍复用上述投影。到达边界后才做 `settled` teardown。只有 panel/window/层级/新 owner 等结构性中断走 `forced` teardown。
 
@@ -476,12 +523,12 @@ boundaryBand = 1 / displayScale
 abs(a - b) < 0.0001pt
 ```
 
-它用于明确的局部数值问题：已知端点算术尾差归一、捕获模型兼容性、
+它用于明确的局部数值问题：权威高度公开值的算术尾差收拢、捕获模型兼容性、
 `didChangeDisplayHeight` 值变化通知去重，以及 movement 结果验证。它不会把任意范围值
 吸到附近端点，也不会过滤系统 `didScroll`、拖拽或 movement 生命周期。
 
-`displayHeight` 本身始终按真实 `!=` 保存最新几何；值变化通知与“上次已通知高度”比较，
-因此多个不足阈值的小变化可以累计后再产生一次通知。
+`displayHeight` 每次保存本轮发布值：`.geometric` 使用真实回读，`.authoritative` 只收拢严格算术尾差。
+值变化通知仍与“上次已通知高度”比较，因此多个不足阈值的小变化可以累计后再产生一次通知。
 
 ### 11.4 外部目标与系统事件使用精确比较
 
@@ -509,15 +556,17 @@ offset，均使用精确 `==` / `!=`。外部哪怕只改动极小量也必须�
 
 修改模型相关代码时至少应保持：
 
-1. `H = V + Y - T` 在布局、拖动、释放和动画中始终一致。
+1. `H = V + Y - P` 在布局、拖动、释放和动画中始终一致。
 2. 每个参与者片段 `outerLength == innerLength >= 0`。
 3. 外层片段按 `outerStart` 非递减。
 4. 同一参与者的 inner ranges 不回退、不重叠。
 5. 同一真实 scroll view 无论拥有多少片段，都只得到一个最终 offset。
 6. 无 detent 只关闭吸附，不关闭组合滚动。
-7. 一个物理像素只用于离散场景或真实几何修正的准入；`0.0001pt` 数值相等只用于明确的局部数值语义，二者都不能放宽结构校验。
+7. 一个物理像素只用于离散场景；`0.0001pt` 数值相等只用于权威值发布等明确的局部数值语义，二者都不能放宽结构校验。
 8. 外部 target 修改和系统生命周期使用精确比较，不得被上述数值带过滤。
 9. 所有 provider/delegate 调整后必须重新确认状态未被同步回调替换，并拒绝非有限目标。
+10. capture 拓扑和捕获时 metrics 在物理 owner 活动期间稳定；自适应连续轴只能在语义拐点原子替换纯模型阶段。
+11. 重基前后的 canonical 参考投影与 raw bounce 分配必须连续；重基本身不得写 UIKit 几何或产生外部回调。
 
 相关纯模型和求解验证位于：
 
