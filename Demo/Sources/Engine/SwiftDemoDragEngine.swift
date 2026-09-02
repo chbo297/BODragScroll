@@ -70,7 +70,7 @@ final class SwiftDemoDragEngine: NSObject, DemoDragEngine {
         options: DemoMovementOptions = .init(),
         completion: ((DemoMovementResult) -> Void)? = nil
     ) -> CGFloat {
-        hostView.move(
+        hostView.scroll(
             toDisplayHeight: displayHeight,
             animated: animated,
             options: options.modern

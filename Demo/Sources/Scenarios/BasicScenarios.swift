@@ -74,8 +74,6 @@ final class FreePanelViewController: DemoScenarioViewController {
         [("freePanelContentScroll", contentScrollView)]
     }
 
-    override var allowsPostInitializationHeightCorrection: Bool { false }
-
     override func configureContent(in contentView: UIView) {
         let controlSurface = UIView()
         controlSurface.backgroundColor = DemoPalette.elevatedSurface

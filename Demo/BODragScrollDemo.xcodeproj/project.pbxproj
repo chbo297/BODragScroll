@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		040D6436F4A811FF1D7F9C72 /* BasicScenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A2A6C0E0DCA9F970BBCA40 /* BasicScenarios.swift */; };
 		1089583760F938599CAFC704 /* DemoScenarioViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BE85FD71823C44EC2FD29E1 /* DemoScenarioViewController.swift */; };
+		13B9EB31529CD59ECA8B2F08 /* DecelerationControlLabUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65C818F21A08A976210829A8 /* DecelerationControlLabUITests.swift */; };
 		17A62664F404DCD013487BAF /* BODemoLegacyDragHost.h in Headers */ = {isa = PBXBuildFile; fileRef = FCB67C42BE9C92026542B51A /* BODemoLegacyDragHost.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		265F2459CF5470066C44453E /* BODragScroll in Frameworks */ = {isa = PBXBuildFile; productRef = D09D8FDD3D8E93853D5DD5CE /* BODragScroll */; };
 		36C13572AE46F59C90F33D5C /* BODemoLegacyDragHost.m in Sources */ = {isa = PBXBuildFile; fileRef = E5315EBDC27474A46D42229C /* BODemoLegacyDragHost.m */; };
@@ -24,6 +25,7 @@
 		91CDB3EFD8B81ED75A8F461D /* BODragScrollDemoSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD333F9E46ABD8E00E1C42F /* BODragScrollDemoSmokeUITests.swift */; };
 		988FEF42008528C8BDBF5FD2 /* DemoCatalogViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73923E1FDD650650E9093D1 /* DemoCatalogViewController.swift */; };
 		9D3BC2240659E923A6059EF2 /* ScrollingScenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */; };
+		A416489A835D77F8E2B5967D /* DecelerationControlLabViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A961C41D09BF5E67849275B /* DecelerationControlLabViewController.swift */; };
 		AE213031163A0041BAE74060 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BC2A0C0CA19A2D04797C3DF /* AppDelegate.swift */; };
 		A1D0C0FFEE1234567890ABCD /* DemoContentOffsetLoggingScrollView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C0FFEE1234567890ABCE /* DemoContentOffsetLoggingScrollView.swift */; };
 		BD91AE5D378F639791324859 /* BODragScrollLegacy.h in Headers */ = {isa = PBXBuildFile; fileRef = BA3A54B63AA9A4568CBFBF2E /* BODragScrollLegacy.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -83,11 +85,13 @@
 		39E138C3E5D87CF270D672D3 /* NestedExplicitParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NestedExplicitParityUITests.swift; sourceTree = "<group>"; };
 		4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollingScenarios.swift; sourceTree = "<group>"; };
 		59E057A564BA0B1E33CEA4B5 /* WebControlsParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebControlsParityUITests.swift; sourceTree = "<group>"; };
+		65C818F21A08A976210829A8 /* DecelerationControlLabUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecelerationControlLabUITests.swift; sourceTree = "<group>"; };
 		6BD86A79D055BB9D83C99C0F /* DemoUITestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoUITestSupport.swift; sourceTree = "<group>"; };
 		6BDFB2E41108F5B5A54EA667 /* DemoTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoTheme.swift; sourceTree = "<group>"; };
 		74257432936EA4AA6B7B9AF8 /* BODragScrollDemoUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BODragScrollDemoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		879252DE65A8C73E2935EDFD /* SwiftDemoDragEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDemoDragEngine.swift; sourceTree = "<group>"; };
 		8863427F811157D6BB8CFB6C /* SystemIntegrationScenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemIntegrationScenarios.swift; sourceTree = "<group>"; };
+		8A961C41D09BF5E67849275B /* DecelerationControlLabViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecelerationControlLabViewController.swift; sourceTree = "<group>"; };
 		8BE85FD71823C44EC2FD29E1 /* DemoScenarioViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoScenarioViewController.swift; sourceTree = "<group>"; };
 		9BC2A0C0CA19A2D04797C3DF /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		B2A2A6C0E0DCA9F970BBCA40 /* BasicScenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BasicScenarios.swift; sourceTree = "<group>"; };
@@ -178,6 +182,7 @@
 			isa = PBXGroup;
 			children = (
 				0BD333F9E46ABD8E00E1C42F /* BODragScrollDemoSmokeUITests.swift */,
+				65C818F21A08A976210829A8 /* DecelerationControlLabUITests.swift */,
 				6BD86A79D055BB9D83C99C0F /* DemoUITestSupport.swift */,
 				E1263890E5EF3F0980C659D0 /* FreePanelBoundaryUITests.swift */,
 				C32F22DA37DA8A18757F53CA /* MovementHandoffParityUITests.swift */,
@@ -225,6 +230,7 @@
 			isa = PBXGroup;
 			children = (
 				B2A2A6C0E0DCA9F970BBCA40 /* BasicScenarios.swift */,
+				8A961C41D09BF5E67849275B /* DecelerationControlLabViewController.swift */,
 				F527640D8B8C96FF338A7A9C /* PolicyLabViewController.swift */,
 				4B273EB2D1EC722EC9C1D5E7 /* ScrollingScenarios.swift */,
 				8863427F811157D6BB8CFB6C /* SystemIntegrationScenarios.swift */,
@@ -350,6 +356,7 @@
 				AE213031163A0041BAE74060 /* AppDelegate.swift in Sources */,
 				040D6436F4A811FF1D7F9C72 /* BasicScenarios.swift in Sources */,
 				A1D0C0FFEE1234567890ABCD /* DemoContentOffsetLoggingScrollView.swift in Sources */,
+				A416489A835D77F8E2B5967D /* DecelerationControlLabViewController.swift in Sources */,
 				988FEF42008528C8BDBF5FD2 /* DemoCatalogViewController.swift in Sources */,
 				55442BBF8E0245C54E9C168D /* DemoDataSources.swift in Sources */,
 				CEC22DDF07B6C66C07FD0B88 /* DemoDragEngine.swift in Sources */,
@@ -380,6 +387,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				91CDB3EFD8B81ED75A8F461D /* BODragScrollDemoSmokeUITests.swift in Sources */,
+				13B9EB31529CD59ECA8B2F08 /* DecelerationControlLabUITests.swift in Sources */,
 				3B0E87238AEE00256A9A639A /* DemoUITestSupport.swift in Sources */,
 				E6FBCBB42996982E84E9750E /* FreePanelBoundaryUITests.swift in Sources */,
 				85FE841E5CB8C9095898FC21 /* MovementHandoffParityUITests.swift in Sources */,

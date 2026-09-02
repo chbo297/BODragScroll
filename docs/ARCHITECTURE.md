@@ -58,14 +58,14 @@ flowchart TD
 | 数组索引便利方法 | `Core/BODragScrollModel.swift` 的 `bo_findIndex`、`ScrollMath` | 保留 `NSNumber.floatValue` 的 Float32 语义 |
 | 不同系统的 inset 抽象 | `BODragScrollUIScrollViewBridge.swift` 的 `effectiveContentInset` | UIKit 兼容层，不进入纯模型 |
 | ScrollView 状态兼容/swizzle | `BODragScrollUIScrollViewBridge.swift` | 只桥接当前主参与者的公开状态 getter |
-| 系统触摸结束时机补完 | `TouchCompletionGestureRecognizer` | 只补齐“停止动画但未开始拖动”的触摸结束 |
+| system-scroll animation 结束后的触摸结束补完 | `TouchCompletionGestureRecognizer` | 唯一候选来源是 `scrollViewDidEndScrollingAnimation` 转发 delegate 后记录的一次性时间戳；`shouldBegin` 仅在间隔 `< 0.1s` 时 arm 并立即消费时间戳，`began` 不修复，`ended && !isDecelerating` 才以零速度 attach，真实 drag 在 `willBeginDragging` 取消；native drag deceleration 不 arm、不绑定 transaction epoch |
 | 吸附点与内部区间数据 | 公开 `BODragScrollInnerScrollSegment`；内部 `ScrollSegment` | 公开输入与构建后模型分离 |
 | 行为属性 | `BODragScrollConfiguration` 的 handoff/bounce/capture/gesture/movement | provider 负责动态决策，configuration 负责稳定策略 |
 | 内部工作状态 | `BODragScrollRuntimeState` 的分组状态 | 每组状态由对应功能文件拥有 |
 | 手指按下、捕获与建模 | `BODragScrollInteraction.swift` → `BODragScrollCapture.swift` | 按响应链生成一次 capture session，并安装首个组合轴阶段 |
 | 滑动过程 | `BODragScrollScrolling.swift` | 投影缓存轴阶段，解析临时几何、单次提交并回读发布；自由面板仅在语义拐点重基参与段 |
 | 手指抬起与惯性 | `BODragScrollTransition.swift` + `Core/BODragScrollTargetSolver.swift` | 求解与 UIKit 执行分离 |
-| pointInside/hitTest/Web/UIControl | `BODragScrollInteraction.swift` | 处理 presentation layer、减速中断和特殊控件 |
+| pointInside/hitTest/Web/UIControl | `BODragScrollInteraction.swift` | 处理 presentation layer、触摸路由和特殊控件；hit-test 与 touch-completion 的候选、attach 及减速落点完全解耦 |
 | 布局 | `BODragScrollView.swift` | panel 尺寸、外层 inset、首次与尺寸变化布局 |
 | 当前内部 ScrollView、刷新和监听 | `BODragScrollCapture.swift` | session、KVO、层级快照、reload 和失效清理 |
 | `displayHeight` 与外部移动 | `BODragScrollView.swift`、`BODragScrollTransition.swift` | 几何事实与移动事务分离 |
@@ -139,7 +139,7 @@ drag 中断旧减速/回弹时，Scrolling 可以在当前合法几何处把整�
 
 configuration、detent 和 behavior provider 的对象与决策版本立即可见，但依赖它们的组合轴、inset 和 provider sizing 在物理 owner 结束前延迟应用。显式布局失效和 viewport 改变仍是结构性中断，可立即重建。这样“策略已经换新”与“旧 owner 仍使用捕获时拓扑/metrics，且仅允许上述位置重基”边界明确，也不需要维护第二份展示高度。
 
-Transition 的 driver 表示真实物理运动，movement transaction 表示一次可完成的公开意图，两者不是强制一一对应：UIKit 省略 `willEndDragging` 时可以只有原生减速 driver。driver 及其监控键通过唯一原子入口释放，因此自然结束、窗口移除和新手势接管都不会留下“永久减速”状态。
+Transition 的 driver 表示真实物理运动，movement transaction 表示一次可完成的公开意图，两者不是强制一一对应：UIKit 省略 `willEndDragging` 时可以只有原生减速 driver。driver 及其监控键通过唯一原子入口释放，因此自然结束、窗口移除和新手势接管都不会留下“永久减速”状态。新 native drag 在 `willBeginDragging` 接管旧 native deceleration 时只释放 Swift 的 transaction/driver owner，不写 `contentOffset`、不合成 `didEndDecelerating`；连续的 UIKit native 运动仅在最后交付一次真实 `didEndDecelerating`。程序化 movement、布局中断或窗口移除主动取得物理所有权时，仍可对已发送的生命周期做至多一次配对收尾。
 
 ## 8. 决策输入与事件输出
 
@@ -150,8 +150,9 @@ Transition 的 driver 表示真实物理运动，movement transaction 表示一�
 
 这样可以避免一个 delegate 同时既修改决策又消费结果。任何 provider 回调都可能重入，因此调用前后使用 `BODragScrollDecisionStateToken` 验证几何和策略输入是否仍是同一版本。
 
-事件也按语义分开：只有 `didChangeDisplayHeight` 是值变化通知；`didScroll` 和拖拽、
-减速、movement 生命周期按事件如实发送，不以高度近似相等为由过滤。
+事件也按语义分开：`didChangeDisplayHeight` 是值变化通知；`didScroll` 是滚动事件；
+`didFinishMovement` 结束单个 transaction；`didBecomeIdleAtDisplayHeight` 在拖拽、减速、动画、
+bounce 回位和延迟移动形成的整批运动完全停止后发布。后两类生命周期事件即使高度未变化也不会被过滤。
 
 ## 9. 关键不变量
 
@@ -170,6 +171,8 @@ Transition 的 driver 表示真实物理运动，movement transaction 表示一�
 13. 新触摸接管减速时，同链只刷新 session generation 并保留 capture 拓扑；符合连续自由面板条件时，只有真实进入 drag 后才可重基轴阶段。旧 transaction、迟到 callback 和异步 sample 必须通过 transaction/driver/session-generation 全部校验，不能清理新 owner。
 14. 自适应重基的普通帧只做 O(1) 门控；命中语义拐点后才以 O(n) 重建参与段，并在原子提交前验证参考点的面板、参与者和 bounce 投影连续。一个物理像素只用于确认面板确实离开旧参与段，不是几何容差。
 15. 系统滚动与 UIView 动画结束后尊重 UIKit 的实际 offset/frame；完成监控只判定事务终态，不追加几何修正。
+16. Touch-completion 仅消费 `scrollViewDidEndScrollingAnimation` 的一次性时间戳；native drag deceleration 不 arm 该候选，原始落点只由 `scrollViewWillEndDragging` 的 target 管理，`scrollViewDidEndDecelerating` 绝不重新 attach。
+17. native deceleration 中新一轮 drag 会如实交付新的 `willBeginDragging → willEndDragging → didEndDragging`；`willBeginDragging` 不伪造旧轮 `didEndDecelerating`，不通过 `setContentOffset` 强行停止物理运动，整段连续 native lifecycle 最后只消费 UIKit 真实发送的一次 `didEndDecelerating`。
 
 ## 10. 为什么 Swift 不存在 OC 本次回归
 

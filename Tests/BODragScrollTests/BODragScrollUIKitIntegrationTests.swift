@@ -209,7 +209,7 @@ private final class ReentrantParticipantLifecycleDelegate: NSObject, UIScrollVie
 }
 
 @MainActor
-private final class SyntheticDecelerationMutationDelegate: NSObject, UIScrollViewDelegate {
+private final class DecelerationMutationDelegate: NSObject, UIScrollViewDelegate {
     var onDidEndDecelerating: (() -> Void)?
     private(set) var didEndDeceleratingCount = 0
     private(set) var willBeginDraggingCount = 0
@@ -289,9 +289,11 @@ private final class DisplayHeightCallbackDelegate: BODragScrollEventDelegate {
 @MainActor
 private final class MovementEventRecorder: BODragScrollEventDelegate {
     private(set) var changedDisplayHeights: [CGFloat] = []
+    private(set) var idleDisplayHeights: [CGFloat] = []
     private(set) var scrollUpdates: [BODragScrollUpdate] = []
     private(set) var announcedDisplayHeights: [CGFloat] = []
     private(set) var results: [BODragScrollMovementResult] = []
+    var onDidBecomeIdle: ((BODragScrollView, CGFloat) -> Void)?
 
     func dragScrollView(
         _ dragScrollView: BODragScrollView,
@@ -305,6 +307,14 @@ private final class MovementEventRecorder: BODragScrollEventDelegate {
         didScroll update: BODragScrollUpdate
     ) {
         scrollUpdates.append(update)
+    }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        didBecomeIdleAtDisplayHeight displayHeight: CGFloat
+    ) {
+        idleDisplayHeights.append(displayHeight)
+        onDidBecomeIdle?(dragScrollView, displayHeight)
     }
 
     func dragScrollView(
@@ -368,7 +378,7 @@ private final class ReentrantMovementStyleProvider: BODragScrollBehaviorProvider
     ) -> BODragScrollMovementStyle {
         if !hasMoved {
             hasMoved = true
-            dragScrollView.move(toDisplayHeight: 180, animated: false)
+            dragScrollView.scroll(toDisplayHeight: 180, animated: false)
         }
         return .viewAnimation
     }
@@ -406,6 +416,34 @@ private final class ReentrantBypassProvider: BODragScrollBehaviorProvider {
 }
 
 @MainActor
+private final class AlwaysBypassDetentsProvider: BODragScrollBehaviorProvider {
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        shouldBypassDetentsAt displayHeight: CGFloat
+    ) -> Bool? {
+        true
+    }
+}
+
+@MainActor
+private final class GestureStateDriver: UIGestureRecognizer {
+    private var reportedState: UIGestureRecognizer.State = .possible
+
+    override var state: UIGestureRecognizer.State {
+        get { reportedState }
+        set { reportedState = newValue }
+    }
+
+    func beginRecognition() {
+        reportedState = .began
+    }
+
+    func endRecognition() {
+        reportedState = .ended
+    }
+}
+
+@MainActor
 private final class ReentrantSegmentProvider: BODragScrollBehaviorProvider {
     var isArmed = false
     var onSegments: ((BODragScrollView) -> Void)?
@@ -433,6 +471,37 @@ private final class ScrollsToTopCallbackScrollView: UIScrollView {
             guard !scrollsToTop, !hasFired else { return }
             hasFired = true
             onFirstDisable?()
+        }
+    }
+}
+
+@MainActor
+private final class DeferredControlRecordingControl: UIControl {
+    enum Event: Equatable {
+        case touchDown
+        case touchUpInside
+        case touchUpOutside
+        case touchCancel
+    }
+
+    private(set) var events: [Event] = []
+    var onTouchUpInside: (() -> Void)?
+    var onTouchCancel: (() -> Void)?
+
+    override func sendActions(for controlEvents: UIControl.Event) {
+        if controlEvents.contains(.touchDown) {
+            events.append(.touchDown)
+        }
+        if controlEvents.contains(.touchUpInside) {
+            events.append(.touchUpInside)
+            onTouchUpInside?()
+        }
+        if controlEvents.contains(.touchUpOutside) {
+            events.append(.touchUpOutside)
+        }
+        if controlEvents.contains(.touchCancel) {
+            events.append(.touchCancel)
+            onTouchCancel?()
         }
     }
 }
@@ -498,10 +567,10 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         )
     }
 
-    func testPreLayoutUnanimatedMoveIsAppliedAfterFirstLayout() {
+    func testPreLayoutUnanimatedScrollIsAppliedAfterFirstLayout() {
         let (dragScrollView, _) = makeHost(layout: false)
 
-        let acceptedHeight = dragScrollView.move(toDisplayHeight: 240, animated: false)
+        let acceptedHeight = dragScrollView.scroll(toDisplayHeight: 240, animated: false)
 
         XCTAssertEqual(acceptedHeight, 240)
         XCTAssertEqual(dragScrollView.displayHeight, 0)
@@ -512,7 +581,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(dragScrollView.contentOffset.y, -400, accuracy: 0.001)
     }
 
-    func testPreLayoutUnanimatedMoveUsesDisabledPanelBounceLimits() {
+    func testPreLayoutUnanimatedScrollUsesDisabledPanelBounceLimits() {
         func makeConstrainedHost() -> BODragScrollView {
             let (host, _) = makeHost(detents: [100, 300], layout: false)
             var configuration = host.configuration
@@ -525,7 +594,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let upperHost = makeConstrainedHost()
         var upperResults: [BODragScrollMovementResult] = []
         XCTAssertEqual(
-            upperHost.move(toDisplayHeight: 500, animated: false) {
+            upperHost.scroll(toDisplayHeight: 500, animated: false) {
                 upperResults.append($0)
             },
             500
@@ -538,7 +607,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let lowerHost = makeConstrainedHost()
         var lowerResults: [BODragScrollMovementResult] = []
         XCTAssertEqual(
-            lowerHost.move(toDisplayHeight: 0, animated: false) {
+            lowerHost.scroll(toDisplayHeight: 0, animated: false) {
                 lowerResults.append($0)
             },
             0
@@ -549,11 +618,11 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(lowerResults.map(\.outcome), [.completed])
     }
 
-    func testUnanimatedMoveCompletesExactlyOnce() {
+    func testUnanimatedScrollCompletesExactlyOnce() {
         let (dragScrollView, _) = makeHost()
         var results: [BODragScrollMovementResult] = []
 
-        let resolvedHeight = dragScrollView.move(
+        let resolvedHeight = dragScrollView.scroll(
             toDisplayHeight: 260,
             animated: false
         ) { results.append($0) }
@@ -613,12 +682,121 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(recorder.results.first?.outcome, .completed)
     }
 
+    func testSameHeightMovementPublishesOneIdleEventOnNextMainTurn() async {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let recorder = MovementEventRecorder()
+        let idle = expectation(description: "movement became idle")
+        recorder.onDidBecomeIdle = { _, _ in idle.fulfill() }
+        dragScrollView.eventDelegate = recorder
+        let initialHeight = dragScrollView.displayHeight
+
+        _ = dragScrollView.scroll(toDisplayHeight: initialHeight, animated: false)
+
+        XCTAssertTrue(recorder.idleDisplayHeights.isEmpty)
+        XCTAssertTrue(dragScrollView.isMovementActive)
+        await fulfillment(of: [idle], timeout: 1)
+        XCTAssertFalse(dragScrollView.isMovementActive)
+        XCTAssertEqual(recorder.idleDisplayHeights, [initialHeight])
+    }
+
+    func testBackToBackImmediateMovementsCoalesceIntoLatestIdleEvent() async {
+        let (dragScrollView, _) = makeHost(detents: [100, 200, 300])
+        let recorder = MovementEventRecorder()
+        let idle = expectation(description: "latest movement became idle")
+        recorder.onDidBecomeIdle = { _, _ in idle.fulfill() }
+        dragScrollView.eventDelegate = recorder
+
+        _ = dragScrollView.scroll(toDisplayHeight: 200, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
+
+        await fulfillment(of: [idle], timeout: 1)
+        XCTAssertEqual(recorder.idleDisplayHeights, [300])
+    }
+
+    func testDragWithoutMovementTransactionStillPublishesIdleEvent() async {
+        let (dragScrollView, _) = makeHost(detents: [])
+        let recorder = MovementEventRecorder()
+        let idle = expectation(description: "transactionless drag became idle")
+        recorder.onDidBecomeIdle = { _, _ in idle.fulfill() }
+        dragScrollView.eventDelegate = recorder
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        XCTAssertTrue(dragScrollView.isMovementActive)
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+
+        XCTAssertTrue(dragScrollView.isMovementActive)
+        await fulfillment(of: [idle], timeout: 1)
+        XCTAssertFalse(dragScrollView.isMovementActive)
+        XCTAssertEqual(recorder.idleDisplayHeights, [dragScrollView.displayHeight])
+    }
+
+    func testMovementStartedFromIdleCallbackPublishesASecondIdleEvent() async {
+        let (dragScrollView, _) = makeHost(detents: [100, 200, 300])
+        let recorder = MovementEventRecorder()
+        let idle = expectation(description: "both movement batches became idle")
+        idle.expectedFulfillmentCount = 2
+        recorder.onDidBecomeIdle = { view, _ in
+            idle.fulfill()
+            if recorder.idleDisplayHeights.count == 1 {
+                _ = view.scroll(toDisplayHeight: 200, animated: false)
+            }
+        }
+        dragScrollView.eventDelegate = recorder
+
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
+
+        await fulfillment(of: [idle], timeout: 1)
+        XCTAssertEqual(recorder.idleDisplayHeights, [300, 200])
+    }
+
+    func testMovementStartedFromCompletionStaysInTheSameIdleBatch() async {
+        let (dragScrollView, _) = makeHost(detents: [100, 200, 300])
+        let recorder = MovementEventRecorder()
+        let idle = expectation(description: "reentrant completion chain became idle")
+        var wasActiveInsideCompletion = false
+        recorder.onDidBecomeIdle = { _, _ in idle.fulfill() }
+        dragScrollView.eventDelegate = recorder
+
+        dragScrollView.scroll(toDisplayHeight: 300, animated: false) { _ in
+            wasActiveInsideCompletion = dragScrollView.isMovementActive
+            dragScrollView.scroll(toDisplayHeight: 200, animated: false)
+        }
+
+        XCTAssertTrue(wasActiveInsideCompletion)
+        XCTAssertTrue(dragScrollView.isMovementActive)
+        await fulfillment(of: [idle], timeout: 1)
+        XCTAssertFalse(dragScrollView.isMovementActive)
+        XCTAssertEqual(recorder.idleDisplayHeights, [200])
+    }
+
+    func testViewAnimationPublishesIdleOnlyAfterAnimationFinishes() async {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let recorder = MovementEventRecorder()
+        let idle = expectation(description: "view animation became idle")
+        recorder.onDidBecomeIdle = { _, _ in idle.fulfill() }
+        dragScrollView.eventDelegate = recorder
+
+        dragScrollView.scroll(
+            toDisplayHeight: 300,
+            animated: true,
+            options: BODragScrollMovementOptions(style: .viewAnimation, duration: 0.05)
+        )
+
+        XCTAssertTrue(dragScrollView.isMovementActive)
+        XCTAssertTrue(recorder.idleDisplayHeights.isEmpty)
+        await fulfillment(of: [idle], timeout: 1)
+        XCTAssertFalse(dragScrollView.isMovementActive)
+        XCTAssertEqual(recorder.idleDisplayHeights, [300])
+    }
+
     func testExternalTargetAdjustmentSmallerThanValueToleranceRemainsAuthoritative() {
         let (dragScrollView, _) = makeHost(detents: [100, 300])
         let provider = TargetOffsetAdjustmentProvider(deltaY: 0.000_05)
         let recorder = MovementEventRecorder()
         dragScrollView.behaviorProvider = provider
-        _ = dragScrollView.move(toDisplayHeight: 180, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
         dragScrollView.eventDelegate = recorder
         dragScrollView.scrollViewWillBeginDragging(dragScrollView)
         var target = CGPoint(x: 0, y: 300 - dragScrollView.bounds.height)
@@ -641,7 +819,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let (dragScrollView, panelView) = makeHost(detents: [100, 200, 300])
         let window = attachToWindow(dragScrollView)
         defer { window.isHidden = true }
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         var residualFrame = panelView.frame
         residualFrame.origin.y += 0.000_01
         dragScrollView.setPanelFrame(residualFrame)
@@ -650,7 +828,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertNotEqual(residualDisplayHeight, 300)
         var results: [BODragScrollMovementResult] = []
 
-        let resolved = dragScrollView.move(
+        let resolved = dragScrollView.scroll(
             toDisplayHeight: 300,
             animated: true,
             options: BODragScrollMovementOptions(style: .systemScroll)
@@ -665,7 +843,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
         let styleRecorder = MovementStyleCallRecorder()
         dragScrollView.behaviorProvider = styleRecorder
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: true)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: true)
         XCTAssertEqual(styleRecorder.callCount, 0)
     }
 
@@ -674,13 +852,13 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             let (dragScrollView, panelView) = makeHost(detents: [100, 300])
             let window = attachToWindow(dragScrollView)
             defer { window.isHidden = true }
-            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
             var residualFrame = panelView.frame
             residualFrame.origin.y += 0.000_01
             dragScrollView.setPanelFrame(residualFrame)
             let residualHeight = dragScrollView.displayHeightForCurrentGeometry
 
-            _ = dragScrollView.move(
+            _ = dragScrollView.scroll(
                 toDisplayHeight: 300,
                 animated: true,
                 options: BODragScrollMovementOptions(style: .viewAnimation)
@@ -696,13 +874,13 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
         do {
             let (dragScrollView, panelView) = makeHost(detents: [100, 300])
-            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
             var residualFrame = panelView.frame
             residualFrame.origin.y += 0.000_01
             dragScrollView.setPanelFrame(residualFrame)
             let residualHeight = dragScrollView.displayHeightForCurrentGeometry
 
-            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
 
             XCTAssertEqual(
                 dragScrollView.displayHeightForCurrentGeometry,
@@ -737,10 +915,10 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         var firstResults: [BODragScrollMovementResult] = []
         var secondResults: [BODragScrollMovementResult] = []
 
-        dragScrollView.move(toDisplayHeight: 180, animated: false) {
+        dragScrollView.scroll(toDisplayHeight: 180, animated: false) {
             firstResults.append($0)
         }
-        dragScrollView.move(toDisplayHeight: 300, animated: false) {
+        dragScrollView.scroll(toDisplayHeight: 300, animated: false) {
             secondResults.append($0)
         }
 
@@ -763,11 +941,11 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         dragScrollView.configuration = configuration
         layout(dragScrollView)
 
-        let upperResult = dragScrollView.move(toDisplayHeight: 500, animated: false)
+        let upperResult = dragScrollView.scroll(toDisplayHeight: 500, animated: false)
         XCTAssertEqual(upperResult, 300, accuracy: 0.001)
         XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
 
-        let lowerResult = dragScrollView.move(toDisplayHeight: 0, animated: false)
+        let lowerResult = dragScrollView.scroll(toDisplayHeight: 0, animated: false)
         XCTAssertEqual(lowerResult, 100, accuracy: 0.001)
         XCTAssertEqual(dragScrollView.displayHeight, 100, accuracy: 0.001)
     }
@@ -785,7 +963,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertNotEqual(panelView.frame.minY, 0)
         XCTAssertEqual(dragScrollView.displayHeight, 100, accuracy: 0.001)
 
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         XCTAssertEqual(panelView.frame.minY, 0, accuracy: 0.001)
         XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
 
@@ -794,7 +972,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertNotEqual(panelView.frame.minY, 0)
         XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
 
-        _ = dragScrollView.move(toDisplayHeight: 100, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 100, animated: false)
         XCTAssertEqual(panelView.frame.minY, 0, accuracy: 0.001)
         XCTAssertEqual(dragScrollView.displayHeight, 100, accuracy: 0.001)
     }
@@ -810,7 +988,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(dragScrollView.contentSize.height, 800, accuracy: 0.001)
         XCTAssertEqual(dragScrollView.maximumOuterOffset, 160, accuracy: 0.001)
         XCTAssertEqual(
-            dragScrollView.move(toDisplayHeight: 800, animated: false),
+            dragScrollView.scroll(toDisplayHeight: 800, animated: false),
             800,
             accuracy: 0.001
         )
@@ -863,7 +1041,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             // Both calls occur inside layout's internal UIKit mutation and are drained in order
             // before the older layout stack resumes.
             dragScrollView.panelView = replacementPanel
-            dragScrollView.move(toDisplayHeight: 240, animated: false) {
+            dragScrollView.scroll(toDisplayHeight: 240, animated: false) {
                 results.append($0)
             }
         }
@@ -894,13 +1072,13 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         var oldResult: BODragScrollMovementResult?
         var oldCallbackHeight: CGFloat?
 
-        dragScrollView.move(toDisplayHeight: 300, animated: true) { result in
+        dragScrollView.scroll(toDisplayHeight: 300, animated: true) { result in
             order.append("old")
             oldResult = result
             oldCallbackHeight = dragScrollView.displayHeight
         }
         provider.onSize = { host in
-            host.move(toDisplayHeight: 220, animated: false) { _ in
+            host.scroll(toDisplayHeight: 220, animated: false) { _ in
                 order.append("new")
             }
         }
@@ -918,7 +1096,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
     func testPanelOnlySettleUsesDetentsWithoutACaptureSession() {
         let (dragScrollView, _) = makeHost(detents: [100, 300])
         XCTAssertNil(dragScrollView.runtime.capture.session)
-        _ = dragScrollView.move(toDisplayHeight: 180, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
 
         let settled = dragScrollView.settleToNearestDetent(animated: false)
 
@@ -937,7 +1115,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         dragScrollView.configuration = configuration
 
         let completed = expectation(description: "view animation completion")
-        dragScrollView.move(toDisplayHeight: 300, animated: true) { _ in
+        dragScrollView.scroll(toDisplayHeight: 300, animated: true) { _ in
             completed.fulfill()
         }
 
@@ -1226,7 +1404,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: true)
 
         delegate.onDidEndDecelerating = {
-            dragScrollView.move(toDisplayHeight: 300, animated: false)
+            dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         }
         dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
 
@@ -1254,7 +1432,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertTrue(dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
 
         var results: [BODragScrollMovementResult] = []
-        dragScrollView.move(toDisplayHeight: 250, animated: false) {
+        dragScrollView.scroll(toDisplayHeight: 250, animated: false) {
             results.append($0)
         }
 
@@ -1293,7 +1471,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
         delegate.onDidFinishMovement = { result in
             guard result.reason == .dragRelease, result.outcome == .interrupted else { return }
-            dragScrollView.move(
+            dragScrollView.scroll(
                 toDisplayHeight: 500,
                 animated: true,
                 options: BODragScrollMovementOptions(
@@ -1305,7 +1483,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
         // A interrupts the drag-release transaction. Its callback starts B before A's begin call
         // returns; A must not subsequently clear B's driver or animation ownership.
-        _ = dragScrollView.move(toDisplayHeight: 250, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 250, animated: false)
 
         XCTAssertEqual(delegate.didEndDeceleratingCount, 1)
         XCTAssertEqual(delegate.results.first?.reason, .dragRelease)
@@ -1323,7 +1501,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testScrollToTopCanTakeOverParticipantOnlyDeceleration() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300])
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         let participant = makeScrollView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 300),
             contentHeight: 900
@@ -1622,12 +1800,12 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         var secondResults: [BODragScrollMovementResult] = []
         let secondFinished = expectation(description: "replacement system animation finished")
 
-        dragScrollView.move(
+        dragScrollView.scroll(
             toDisplayHeight: 300,
             animated: true,
             options: BODragScrollMovementOptions(style: .systemScroll)
         ) { firstResults.append($0) }
-        dragScrollView.move(
+        dragScrollView.scroll(
             toDisplayHeight: 200,
             animated: true,
             options: BODragScrollMovementOptions(style: .systemScroll)
@@ -1673,7 +1851,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let window = attachToWindow(dragScrollView)
         defer { window.isHidden = true }
         var previousResults: [BODragScrollMovementResult] = []
-        dragScrollView.move(
+        dragScrollView.scroll(
             toDisplayHeight: 300,
             animated: true,
             options: BODragScrollMovementOptions(style: .viewAnimation, duration: 0.5)
@@ -1697,15 +1875,15 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertNil(dragScrollView.runtime.transition.driver)
     }
 
-    func testProgrammaticMoveStopsAndSupersedesActiveScrollToTop() {
+    func testProgrammaticScrollStopsAndSupersedesActiveScrollToTop() {
         let (dragScrollView, _) = makeHost(detents: [100, 200, 300])
         let window = attachToWindow(dragScrollView)
         defer { window.isHidden = true }
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         XCTAssertTrue(dragScrollView.scrollViewShouldScrollToTop(dragScrollView))
         XCTAssertEqual(dragScrollView.runtime.transition.driver, .scrollToTop)
 
-        _ = dragScrollView.move(toDisplayHeight: 200, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 200, animated: false)
 
         XCTAssertEqual(dragScrollView.displayHeight, 200, accuracy: 0.001)
         XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
@@ -1720,7 +1898,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             dragScrollView.interruptActiveMovement(outcome: .interrupted)
             window.isHidden = true
         }
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         XCTAssertTrue(dragScrollView.scrollViewShouldScrollToTop(dragScrollView))
         let firstID = try XCTUnwrap(
             dragScrollView.runtime.transition.activeTransaction?.id
@@ -1728,8 +1906,8 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
         // Replace A completely, return to a non-top position, then authorize B. UIKit can still
         // deliver A's identifier-less didScrollToTop callback while B is current.
-        _ = dragScrollView.move(toDisplayHeight: 200, animated: false)
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 200, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         XCTAssertTrue(dragScrollView.scrollViewShouldScrollToTop(dragScrollView))
         let replacementID = try XCTUnwrap(
             dragScrollView.runtime.transition.activeTransaction?.id
@@ -1767,7 +1945,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let (dragScrollView, _) = makeHost(layout: false)
         let delegate = DisplayHeightCallbackDelegate()
         delegate.onFirstChange = { host in
-            host.move(toDisplayHeight: 240, animated: false)
+            host.scroll(toDisplayHeight: 240, animated: false)
         }
         dragScrollView.eventDelegate = delegate
 
@@ -1801,7 +1979,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         participant.offsetDidChange = { _ in
             guard !didStartNewMovement else { return }
             didStartNewMovement = true
-            _ = dragScrollView.move(toDisplayHeight: newMovementHeight, animated: false)
+            _ = dragScrollView.scroll(toDisplayHeight: newMovementHeight, animated: false)
             // UIScrollView pixel-aligns a programmatic half-pixel `contentOffset`. Inject the exact
             // bounds sample that may arise from composite arithmetic, then let the normal callback
             // publish it. Without the layout transaction epoch guard, the stale layout correction
@@ -1856,7 +2034,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         participant.offsetDidChange = { _ in
             guard !didAttemptInvalidMovement else { return }
             didAttemptInvalidMovement = true
-            _ = dragScrollView.move(toDisplayHeight: .nan, animated: false)
+            _ = dragScrollView.scroll(toDisplayHeight: .nan, animated: false)
         }
 
         provider.isArmed = true
@@ -1878,7 +2056,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         dragScrollView.behaviorProvider = provider
         var firstResults: [BODragScrollMovementResult] = []
 
-        dragScrollView.move(toDisplayHeight: 300, animated: true) {
+        dragScrollView.scroll(toDisplayHeight: 300, animated: true) {
             firstResults.append($0)
         }
 
@@ -1889,7 +2067,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testSettleProviderCannotOverwriteNewPreLayoutMovement() {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300])
-        _ = dragScrollView.move(toDisplayHeight: 180, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
         let provider = ReentrantSegmentProvider()
         dragScrollView.behaviorProvider = provider
         let participant = makeScrollView(
@@ -1903,7 +2081,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let replacementPanel = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 800))
         provider.onSegments = { host in
             host.panelView = replacementPanel
-            host.move(toDisplayHeight: 250, animated: false)
+            host.scroll(toDisplayHeight: 250, animated: false)
         }
         provider.isArmed = true
 
@@ -1920,7 +2098,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         var results: [BODragScrollMovementResult] = []
         dragScrollView.contentOffset.y = .greatestFiniteMagnitude
 
-        _ = dragScrollView.move(
+        _ = dragScrollView.scroll(
             toDisplayHeight: .greatestFiniteMagnitude,
             animated: false
         ) { results.append($0) }
@@ -1935,7 +2113,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         var results: [BODragScrollMovementResult] = []
 
         dragScrollView.scrollViewWillBeginDragging(dragScrollView)
-        _ = dragScrollView.move(toDisplayHeight: 250, animated: false) {
+        _ = dragScrollView.scroll(toDisplayHeight: 250, animated: false) {
             results.append($0)
         }
 
@@ -1960,7 +2138,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let olderReplacement = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 800))
         let newestReplacement = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 800))
 
-        dragScrollView.move(toDisplayHeight: 300, animated: true) { _ in
+        dragScrollView.scroll(toDisplayHeight: 300, animated: true) { _ in
             dragScrollView.panelView = newestReplacement
         }
         dragScrollView.panelView = olderReplacement
@@ -1974,7 +2152,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         defer { window.isHidden = true }
         let completed = expectation(description: "terminal view animation")
 
-        dragScrollView.move(
+        dragScrollView.scroll(
             toDisplayHeight: 300,
             animated: true,
             options: BODragScrollMovementOptions(
@@ -2201,7 +2379,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testThreeLevelNestedInitialPrefixProjectsIntoOutermostBeforeSlice() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
-        _ = dragScrollView.move(toDisplayHeight: 500, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 500, animated: false)
 
         let outer = makeScrollView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 400),
@@ -2591,7 +2769,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         participant.offsetDidChange = { _ in
             guard !hasMoved else { return }
             hasMoved = true
-            dragScrollView.move(toDisplayHeight: 250, animated: false)
+            dragScrollView.scroll(toDisplayHeight: 250, animated: false)
         }
 
         dragScrollView.contentOffset.y = participantSegment.outerStart
@@ -2954,7 +3132,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
     }
 
-    func testNewTouchDuringParticipantDecelerationRefreshesSameCaptureAndInterruptsOldMovement() throws {
+    func testSecondDragDuringParticipantDecelerationRefreshesSameCaptureAndCompletesAtRealEnd() throws {
         let fixture = try makeBottomInnerOverscrollFixture()
         let participantLifecycle = ParticipantLifecycleSpy()
         let events = ReentrantDecelerationDelegate()
@@ -3003,19 +3181,31 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
         XCTAssertEqual(events.results.map(\.reason), [.dragRelease])
         XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
-        XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
+        XCTAssertTrue(participantLifecycle.didDecelerate.isEmpty)
         XCTAssertEqual(participantLifecycle.began.count, 1)
-        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+
+        // The replacement touch owns a full release lifecycle. The open native deceleration debt is
+        // paired only by the one real UIKit terminal callback below.
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        XCTAssertEqual(
+            fixture.dragScrollView.runtime.transition.activeTransaction?.reason,
+            .dragRelease
+        )
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
 
         fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
 
-        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
         XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
         XCTAssertEqual(events.didEndDeceleratingCount, 1)
-        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
     }
 
-    func testNewTouchDuringBottomBounceDecelerationPreservesSameCaptureAndIgnoresLateOldEnd() throws {
+    func testSecondDragDuringBottomBouncePreservesCaptureThroughRealDecelerationEnd() throws {
         let observingPanel = GeometryObservingPanelView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 800)
         )
@@ -3086,11 +3276,11 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
         XCTAssertEqual(events.results.map(\.reason), [.dragRelease])
         XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
-        XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
+        XCTAssertTrue(participantLifecycle.didDecelerate.isEmpty)
         XCTAssertEqual(participantLifecycle.began.count, 1)
-        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertEqual(events.didEndDeceleratingCount, 0)
         XCTAssertEqual(events.willBeginDraggingCount, 1)
-        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
         XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
         XCTAssertTrue(observingPanel.centerChanges.isEmpty)
 
@@ -3115,8 +3305,15 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let continuedPanelFrame = fixture.panelView.frame
         let continuedParticipantOffset = fixture.participant.contentOffset
 
-        // UIKit may still deliver the callback belonging to the deceleration interrupted above.
-        // It has no authority over the tracking lifecycle and refreshed capture generation.
+        // Finish the replacement touch's WEnd/DEnd(true) pair before UIKit sends its single real
+        // did-end-decelerating callback for the continuous native lifecycle.
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+
         fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
 
         XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === originalSession)
@@ -3126,7 +3323,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(participantLifecycle.didDecelerate.count, 1)
         XCTAssertEqual(events.didEndDeceleratingCount, 1)
-        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
         XCTAssertEqual(fixture.dragScrollView.contentOffset, continuedHostOffset)
         XCTAssertEqual(fixture.panelView.frame, continuedPanelFrame)
         XCTAssertEqual(fixture.participant.contentOffset, continuedParticipantOffset)
@@ -3319,7 +3516,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testAdaptiveFreePanelRebasePreservesNestedParticipantAxis() throws {
         let (dragScrollView, panelView) = makeHost()
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         let outer = makeScrollView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 400),
             contentHeight: 1_200
@@ -3563,7 +3760,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             dragScrollView.endCapture()
             window.isHidden = true
         }
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         var configuration = dragScrollView.configuration
         configuration.handoff.innerScrollPlacement = .atDisplayHeight(300)
         dragScrollView.configuration = configuration
@@ -3607,7 +3804,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             dragScrollView.endCapture()
             window.isHidden = true
         }
-        _ = dragScrollView.move(
+        _ = dragScrollView.scroll(
             toDisplayHeight: exactMaximumDisplayHeight,
             animated: false
         )
@@ -3660,7 +3857,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             dragScrollView.endCapture()
             window.isHidden = true
         }
-        _ = dragScrollView.move(
+        _ = dragScrollView.scroll(
             toDisplayHeight: providerDisplayHeight,
             animated: false
         )
@@ -3725,7 +3922,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             dragScrollView.endCapture()
             window.isHidden = true
         }
-        _ = dragScrollView.move(
+        _ = dragScrollView.scroll(
             toDisplayHeight: exactMaximumDisplayHeight,
             animated: false
         )
@@ -3782,7 +3979,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             dragScrollView.endCapture()
             window.isHidden = true
         }
-        _ = dragScrollView.move(
+        _ = dragScrollView.scroll(
             toDisplayHeight: exactMaximumDisplayHeight,
             animated: false
         )
@@ -3819,7 +4016,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             window.isHidden = true
         }
         let exactMinimumDisplayHeight = dragScrollView.effectiveMinimumDisplayHeight
-        _ = dragScrollView.move(
+        _ = dragScrollView.scroll(
             toDisplayHeight: exactMinimumDisplayHeight,
             animated: false
         )
@@ -3871,7 +4068,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             window.isHidden = true
         }
         let exactMinimumDisplayHeight = dragScrollView.effectiveMinimumDisplayHeight
-        _ = dragScrollView.move(
+        _ = dragScrollView.scroll(
             toDisplayHeight: exactMinimumDisplayHeight,
             animated: false
         )
@@ -4082,7 +4279,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         ) throws -> BODragScrollAxisRebasePolicy? {
             let (dragScrollView, panelView) = makeHost(detents: detents)
             defer { dragScrollView.endCapture() }
-            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
             configure(dragScrollView)
             dragScrollView.behaviorProvider = provider
             let participant = makeScrollView(
@@ -4150,7 +4347,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testMismatchRecoveryDoesNotPromoteExplicitProviderAxisToAdaptive() throws {
         let (dragScrollView, panelView) = makeHost()
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         let provider = SegmentProvider([
             BODragScrollInnerScrollSegment(
                 displayHeight: 300,
@@ -4226,12 +4423,19 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertEqual(fixture.panelView.frame, panelFrame)
         XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
         XCTAssertNil(fixture.dragScrollView.runtime.transition.driver)
-        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
-
-        // A late callback from the interrupted driver cannot tear down the new drag or its phase.
-        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
-        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
         XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: expandedOuterOffset
+        )
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
     }
 
     func testNewDragRebasesAdaptiveInnerBounceFromLegalBoundaryWithoutGeometryWrites() throws {
@@ -4288,9 +4492,9 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         )
     }
 
-    func testNewTouchStopsWhenSyntheticOldDecelerationEndRemovesHost() throws {
+    func testRealDecelerationEndStopsWhenParticipantCallbackRemovesHost() throws {
         let fixture = try makeBottomInnerOverscrollFixture()
-        let participantLifecycle = SyntheticDecelerationMutationDelegate()
+        let participantLifecycle = DecelerationMutationDelegate()
         let events = ReentrantDecelerationDelegate()
         fixture.participant.delegate = participantLifecycle
         fixture.dragScrollView.eventDelegate = events
@@ -4309,21 +4513,34 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             fixture.dragScrollView.removeFromSuperview()
         }
 
-        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+        // Match UIKit/OC exactly: the second touch owns another complete drag-release sequence.
+        // Merely beginning it must not synthesize the old deceleration's terminal callback.
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+
+        XCTAssertNotNil(fixture.dragScrollView.window)
+        XCTAssertEqual(participantLifecycle.didEndDeceleratingCount, 0)
+        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 1)
+        XCTAssertEqual(events.didEndDeceleratingCount, 0)
+        XCTAssertEqual(events.willBeginDraggingCount, 1)
+
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
 
         XCTAssertNil(fixture.dragScrollView.window)
         XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
         XCTAssertNil(fixture.dragScrollView.runtime.transition.captureCleanupOwnership)
         XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
         XCTAssertEqual(participantLifecycle.didEndDeceleratingCount, 1)
-        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 0)
+        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 1)
         XCTAssertEqual(events.didEndDeceleratingCount, 1)
-        XCTAssertEqual(events.willBeginDraggingCount, 0)
+        XCTAssertEqual(events.willBeginDraggingCount, 1)
     }
 
-    func testNewTouchStopsWhenSyntheticOldDecelerationEndReplacesPanel() throws {
+    func testRealDecelerationEndStopsWhenParticipantCallbackReplacesPanel() throws {
         let fixture = try makeBottomInnerOverscrollFixture()
-        let participantLifecycle = SyntheticDecelerationMutationDelegate()
+        let participantLifecycle = DecelerationMutationDelegate()
         let events = ReentrantDecelerationDelegate()
         fixture.participant.delegate = participantLifecycle
         fixture.dragScrollView.eventDelegate = events
@@ -4344,16 +4561,29 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             fixture.dragScrollView.panelView = replacementPanel
         }
 
-        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+        // Match UIKit/OC exactly: the second release inherits the open native deceleration debt.
+        // Only UIKit's real terminal callback may publish did-end-decelerating.
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+
+        XCTAssertFalse(fixture.dragScrollView.panelView === replacementPanel)
+        XCTAssertEqual(participantLifecycle.didEndDeceleratingCount, 0)
+        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 1)
+        XCTAssertEqual(events.didEndDeceleratingCount, 0)
+        XCTAssertEqual(events.willBeginDraggingCount, 1)
+
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
 
         XCTAssertTrue(fixture.dragScrollView.panelView === replacementPanel)
         XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
         XCTAssertNil(fixture.dragScrollView.runtime.transition.captureCleanupOwnership)
         XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
         XCTAssertEqual(participantLifecycle.didEndDeceleratingCount, 1)
-        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 0)
+        XCTAssertEqual(participantLifecycle.willBeginDraggingCount, 1)
         XCTAssertEqual(events.didEndDeceleratingCount, 1)
-        XCTAssertEqual(events.willBeginDraggingCount, 0)
+        XCTAssertEqual(events.willBeginDraggingCount, 1)
     }
 
     func testNewTouchStopsWhenInterruptedMovementCompletionRemovesHost() throws {
@@ -4451,63 +4681,338 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
     }
 
-    func testDecelerationEndDuringTrackingOnlyTouchSettlesAfterTouchEnds() async throws {
-        let fixture = try makeBottomInnerOverscrollFixture()
-        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
-        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
-        guard fixture.dragScrollView.responds(to: trackingDidBegin),
-              fixture.dragScrollView.responds(to: trackingDidEnd) else {
-            XCTFail("This UIKit runtime cannot expose a physical tracking-only test state.")
-            return
-        }
-        let events = ReentrantDecelerationDelegate()
-        let completed = expectation(description: "interrupted deceleration settled")
-        events.onDidFinishMovement = { result in
-            guard result.reason == .dragRelease else { return }
-            completed.fulfill()
-        }
-        fixture.dragScrollView.eventDelegate = events
+    func testDragDecelerationDoesNotArmTouchCompletionCandidate() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        try beginDragDeceleration(
+            on: dragScrollView,
+            targetOffsetY: 300 - dragScrollView.bounds.height
+        )
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertEqual(
+            dragScrollView.runtime.transition.activeTransaction?.reason,
+            .dragRelease
+        )
+        XCTAssertFalse(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertFalse(dragScrollView.isAwaitingTouchCompletionSettlement)
+
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
+    }
+
+    func testParticipantSegmentDragDecelerationDoesNotArmPanelSettlement() throws {
+        let fixture = try makeCapturedParticipantFixture()
         defer {
-            if fixture.dragScrollView.nativeScrollState.isTracking {
-                fixture.dragScrollView.perform(trackingDidEnd)
+            if fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating {
+                fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
             }
-            fixture.dragScrollView.eventDelegate = nil
             fixture.dragScrollView.endCapture()
             fixture.window.isHidden = true
-            _ = fixture.provider
         }
+        fixture.dragScrollView.endCapture()
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 180,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        fixture.dragScrollView.behaviorProvider = provider
+        defer { _ = provider }
+        _ = fixture.dragScrollView.scroll(toDisplayHeight: 180, animated: false)
+        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        let model = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session?.model)
+        let participantSegment = try XCTUnwrap(
+            model.segments.first { $0.isParticipantSegment && $0.outerLength > 0 }
+        )
+        XCTAssertEqual(participantSegment.displayHeight, 180, accuracy: 0.001)
+        let participantMidpoint = participantSegment.outerStart
+            + participantSegment.outerLength * 0.5
+        let events = MovementEventRecorder()
+        fixture.dragScrollView.eventDelegate = events
+
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+        deliverHostScroll(fixture.dragScrollView, to: participantMidpoint)
+        let participantOffset = fixture.participant.contentOffset
+        XCTAssertTrue(fixture.dragScrollView.isWithinParticipantSegment)
+        XCTAssertEqual(
+            fixture.dragScrollView.displayHeight,
+            participantSegment.displayHeight,
+            accuracy: 0.001
+        )
+
         try beginDragDeceleration(
             on: fixture.dragScrollView,
-            targetOffsetY: fixture.maximumOuterOffset
+            targetOffsetY: participantSegment.outerStart
+                + participantSegment.outerLength * 0.75
         )
-        let session = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
-        let transaction = try XCTUnwrap(
-            fixture.dragScrollView.runtime.transition.activeTransaction
+        let recognizer = try XCTUnwrap(
+            touchCompletionRecognizer(in: fixture.dragScrollView)
         )
 
-        fixture.dragScrollView.perform(trackingDidBegin)
-        fixture.dragScrollView.beginCapture(from: fixture.leafView)
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertEqual(
+            fixture.dragScrollView.runtime.transition.activeTransaction?.reason,
+            .dragRelease
+        )
+        XCTAssertFalse(fixture.dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertFalse(fixture.dragScrollView.isAwaitingTouchCompletionSettlement)
+
         fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
 
-        XCTAssertTrue(fixture.dragScrollView.nativeScrollState.isTracking)
-        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
-        XCTAssertEqual(events.didEndDeceleratingCount, 1)
-        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
-        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
-        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
-
-        try await Task.sleep(nanoseconds: 80_000_000)
-        XCTAssertTrue(fixture.dragScrollView.runtime.transition.activeTransaction === transaction)
-        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === session)
-
-        fixture.dragScrollView.perform(trackingDidEnd)
-        await fulfillment(of: [completed], timeout: 2)
-
-        XCTAssertEqual(events.didEndDeceleratingCount, 1)
-        XCTAssertEqual(events.results.map(\.outcome), [.completed])
+        XCTAssertFalse(events.results.contains { $0.reason == .programmatic })
+        XCTAssertEqual(events.announcedDisplayHeights, [180])
         XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
         XCTAssertNil(fixture.dragScrollView.runtime.transition.driver)
-        XCTAssertNil(fixture.dragScrollView.runtime.capture.session)
+        XCTAssertEqual(fixture.participant.contentOffset, participantOffset)
+        XCTAssertEqual(
+            fixture.dragScrollView.contentOffset.y,
+            participantSegment.displayHeight - fixture.dragScrollView.bounds.height,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            fixture.dragScrollView.displayHeight,
+            participantSegment.displayHeight,
+            accuracy: 0.001
+        )
+    }
+
+    func testTransactionlessDragDecelerationDoesNotArmTouchCompletionCandidate() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: true)
+
+        XCTAssertEqual(dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertFalse(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertFalse(dragScrollView.isAwaitingTouchCompletionSettlement)
+
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
+    }
+
+    func testDidEndDeceleratingDoesNotStartNearestDetentRepair() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let events = MovementEventRecorder()
+        dragScrollView.eventDelegate = events
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        try beginDragDeceleration(
+            on: dragScrollView,
+            targetOffsetY: 300 - dragScrollView.bounds.height
+        )
+        let programmaticResultCount = events.results.filter {
+            $0.reason == .programmatic
+        }.count
+
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
+
+        XCTAssertEqual(
+            events.results.filter { $0.reason == .programmatic }.count,
+            programmaticResultCount
+        )
+        XCTAssertEqual(dragScrollView.displayHeight, 180, accuracy: 0.001)
+        XCTAssertFalse(dragScrollView.isAwaitingTouchCompletionSettlement)
+    }
+
+    func testNaturalNativeDecelerationUsesWillEndTargetWithoutNearestRepair() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
+        let events = MovementEventRecorder()
+        dragScrollView.eventDelegate = events
+
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        var target = CGPoint(x: 0, y: 300 - dragScrollView.bounds.height)
+        dragScrollView.scrollViewWillEndDragging(
+            dragScrollView,
+            withVelocity: CGPoint(x: 0, y: 1),
+            targetContentOffset: &target
+        )
+
+        XCTAssertEqual(target.y, 300 - dragScrollView.bounds.height, accuracy: 0.001)
+        XCTAssertEqual(events.announcedDisplayHeights, [300])
+
+        dragScrollView.contentOffset = target
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: true)
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+
+        XCTAssertEqual(
+            events.results.filter { $0.reason == .dragRelease }.map(\.outcome),
+            [.completed]
+        )
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertFalse(events.results.contains { $0.reason == .programmatic })
+        XCTAssertFalse(dragScrollView.isAwaitingTouchCompletionSettlement)
+        XCTAssertFalse(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+    }
+
+    func testRecentSystemAnimationTouchCompletionPreservesCandidateAtBeganAndSettlesAtEnded() async throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let events = ReentrantDecelerationDelegate()
+        dragScrollView.eventDelegate = events
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        let gestureState = GestureStateDriver()
+
+        prepareRecentSystemAnimationInterruption(on: dragScrollView, recognizer: recognizer)
+        XCTAssertFalse(dragScrollView.nativeScrollState.isDecelerating)
+        let resultCountBeforeTouchCompletion = events.results.count
+        let repaired = expectation(description: "OC touch completion attachment finished")
+        events.onDidFinishMovement = { result in
+            guard result.reason == .programmatic,
+                  result.outcome == .completed,
+                  abs(result.finalDisplayHeight - 100) < 0.001 else { return }
+            repaired.fulfill()
+        }
+
+        gestureState.beginRecognition()
+        dragScrollView.interaction_handleTouchCompletion(gestureState)
+
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
+        XCTAssertEqual(events.results.count, resultCountBeforeTouchCompletion)
+        XCTAssertEqual(dragScrollView.displayHeight, 180, accuracy: 0.001)
+
+        gestureState.endRecognition()
+        dragScrollView.interaction_handleTouchCompletion(gestureState)
+
+        await fulfillment(of: [repaired], timeout: 2)
+
+        XCTAssertEqual(events.results.count, resultCountBeforeTouchCompletion + 1)
+        XCTAssertEqual(events.results.last?.reason, .programmatic)
+        XCTAssertEqual(events.results.last?.outcome, .completed)
+        XCTAssertEqual(dragScrollView.displayHeight, 100, accuracy: 0.001)
+        // OC keeps this candidate until the next should-begin decision or a real drag takes over.
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
+    }
+
+    func testRecentSystemAnimationTouchCompletionAtDetentIsOCNoOp() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        _ = dragScrollView.scroll(toDisplayHeight: 100, animated: false)
+        let events = MovementEventRecorder()
+        dragScrollView.eventDelegate = events
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        let gestureState = GestureStateDriver()
+        dragScrollView.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
+        XCTAssertTrue(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+
+        gestureState.endRecognition()
+        dragScrollView.interaction_handleTouchCompletion(gestureState)
+
+        XCTAssertTrue(events.announcedDisplayHeights.isEmpty)
+        XCTAssertTrue(events.results.isEmpty)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertEqual(dragScrollView.displayHeight, 100, accuracy: 0.001)
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
+    }
+
+    func testRecentSystemAnimationTouchCompletionRespectsNonSnappingRange() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
+        dragScrollView.nonSnappingRanges = [150...200]
+        let events = MovementEventRecorder()
+        dragScrollView.eventDelegate = events
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        let gestureState = GestureStateDriver()
+        dragScrollView.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
+        XCTAssertTrue(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+
+        gestureState.endRecognition()
+        dragScrollView.interaction_handleTouchCompletion(gestureState)
+
+        XCTAssertTrue(events.announcedDisplayHeights.isEmpty)
+        XCTAssertTrue(events.results.isEmpty)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertEqual(dragScrollView.displayHeight, 180, accuracy: 0.001)
+    }
+
+    func testRecentSystemAnimationTouchCompletionRespectsProviderBypass() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
+        let provider = AlwaysBypassDetentsProvider()
+        defer { _ = provider }
+        dragScrollView.behaviorProvider = provider
+        let events = MovementEventRecorder()
+        dragScrollView.eventDelegate = events
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        let gestureState = GestureStateDriver()
+        dragScrollView.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
+        XCTAssertTrue(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+
+        gestureState.endRecognition()
+        dragScrollView.interaction_handleTouchCompletion(gestureState)
+
+        XCTAssertTrue(events.announcedDisplayHeights.isEmpty)
+        XCTAssertTrue(events.results.isEmpty)
+        XCTAssertNil(dragScrollView.runtime.transition.activeTransaction)
+        XCTAssertEqual(dragScrollView.displayHeight, 180, accuracy: 0.001)
+    }
+
+    func testWillBeginDraggingCancelsRecentSystemAnimationTouchCompletion() throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let events = MovementEventRecorder()
+        dragScrollView.eventDelegate = events
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        let gestureState = GestureStateDriver()
+
+        prepareRecentSystemAnimationInterruption(on: dragScrollView, recognizer: recognizer)
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
+        let resultCountBeforeDrag = events.results.count
+
+        // Crossing UIKit's drag threshold transfers settlement to the ordinary drag lifecycle.
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        gestureState.endRecognition()
+        dragScrollView.interaction_handleTouchCompletion(gestureState)
+
+        XCTAssertFalse(dragScrollView.isAwaitingTouchCompletionSettlement)
+        XCTAssertEqual(events.results.count, resultCountBeforeDrag)
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+    }
+
+    func testSystemAnimationCandidateUsesOCOneSidedRecencyWindow() throws {
+        let dragScrollView = BODragScrollView(frame: viewport)
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        dragScrollView.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970 - 0.101
+
+        XCTAssertFalse(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertFalse(dragScrollView.isAwaitingTouchCompletionSettlement)
+        XCTAssertEqual(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+
+        dragScrollView.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970 + 1
+        XCTAssertTrue(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
+        XCTAssertEqual(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+    }
+
+    func testNewDecelerationBeforeTouchCompletionEndSuppressesNearestAttachment() async throws {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let events = MovementEventRecorder()
+        dragScrollView.eventDelegate = events
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
+        let gestureState = GestureStateDriver()
+
+        prepareRecentSystemAnimationInterruption(on: dragScrollView, recognizer: recognizer)
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: true)
+        let resultCountBeforeTouchCompletion = events.results.count
+        gestureState.endRecognition()
+        dragScrollView.interaction_handleTouchCompletion(gestureState)
+
+        let callbacksDrained = expectation(description: "suppressed completion callbacks drained")
+        DispatchQueue.main.async { callbacksDrained.fulfill() }
+        await fulfillment(of: [callbacksDrained], timeout: 1)
+
+        XCTAssertTrue(dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertEqual(events.results.count, resultCountBeforeTouchCompletion)
+        dragScrollView.scrollViewDidEndDecelerating(dragScrollView)
     }
 
     func testDirtyDecelerationTrackingOnlyTouchKeepsOldAxisUntilSettlement() async throws {
@@ -4946,7 +5451,12 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
 
-        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+        // The second touch crosses the drag threshold and releases into deceleration. Keep its
+        // WBegin/WEnd/DEnd(true) sequence intact before UIKit's one real terminal callback.
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
 
         let freshSession = try XCTUnwrap(fixture.dragScrollView.runtime.capture.session)
         let freshModel = try XCTUnwrap(freshSession.model)
@@ -4959,18 +5469,23 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
             oldOperationEpoch
         )
         XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === freshSession)
-        XCTAssertNil(fixture.dragScrollView.runtime.transition.activeTransaction)
-        XCTAssertNil(fixture.dragScrollView.runtime.transition.driver)
-        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
-        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertFalse(
+            fixture.dragScrollView.runtime.transition.activeTransaction === oldTransaction
+        )
+        XCTAssertEqual(
+            fixture.dragScrollView.runtime.transition.activeTransaction?.reason,
+            .dragRelease
+        )
+        XCTAssertEqual(fixture.dragScrollView.runtime.transition.driver, .dragDeceleration)
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
         XCTAssertEqual(events.results.map(\.reason), [.dragRelease])
         XCTAssertEqual(events.results.map(\.outcome), [.interrupted])
-        XCTAssertEqual(events.didEndDeceleratingCount, 1)
+        XCTAssertEqual(events.didEndDeceleratingCount, 0)
 
         fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
 
-        XCTAssertTrue(fixture.dragScrollView.runtime.capture.session === freshSession)
-        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertFalse(fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive)
         XCTAssertEqual(events.didEndDeceleratingCount, 1)
     }
 
@@ -5110,7 +5625,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testForcedInnerTopBounceUsesCurrentExactDetentAsCaptureMinimum() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
 
         let participant = makeScrollView(
@@ -5153,7 +5668,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
         for placement in placements {
             let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
-            _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+            _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
             let participant = makeScrollView(
                 frame: CGRect(x: 0, y: 0, width: 320, height: 300),
                 contentHeight: 900
@@ -5182,7 +5697,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testForcedInnerTopBounceDoesNotTrimFixedPlacementDetents() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         let participant = makeScrollView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 300),
             contentHeight: 900
@@ -5214,7 +5729,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testForcedInnerTopBounceDoesNotTrimProviderSpecifiedDetents() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         let provider = SegmentProvider([
             BODragScrollInnerScrollSegment(
                 displayHeight: 300,
@@ -5256,7 +5771,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testForcedInnerTopBounceKeepsSingleSpecifiedSegmentAcrossNestedChain() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         let provider = SegmentProvider([
             BODragScrollInnerScrollSegment(
                 displayHeight: 300,
@@ -5300,7 +5815,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     func testForcedInnerTopBounceFallsBackToSmartSuffixForInvalidSpecifiedSegments() throws {
         let (dragScrollView, panelView) = makeHost(detents: [100, 300, 500])
-        _ = dragScrollView.move(toDisplayHeight: 300, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 300, animated: false)
         let provider = SegmentProvider([
             BODragScrollInnerScrollSegment(
                 displayHeight: .nan,
@@ -5513,6 +6028,534 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
     // MARK: - Accessibility and touch-completion timing
 
+    func testTrackingOnlyDeferredControlTouchCompletesExactlyOnce() throws {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let touchToken = NSObject()
+        let touchIdentifier = ObjectIdentifier(touchToken)
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: touchIdentifier,
+            initialLocationInHost: .zero
+        )
+        XCTAssertNotNil(dragScrollView.pendingDeferredControlInteractionID)
+        XCTAssertEqual(control.events, [.touchDown])
+
+        // A tracking-only scroll lifecycle is not a physical touch outcome and cannot preempt a
+        // later system cancellation into a false touchUpInside.
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+        XCTAssertEqual(control.events, [.touchDown])
+
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: touchIdentifier,
+            terminalLocationInHost: CGPoint(x: 10, y: 10),
+            cancelled: false
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchUpInside])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: touchIdentifier,
+            terminalLocationInHost: CGPoint(x: 10, y: 10),
+            cancelled: false
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchUpInside])
+    }
+
+    func testDeferredControlTouchCancelsAsSoonAsRealDragBegins() {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let touchToken = NSObject()
+        let touchIdentifier = ObjectIdentifier(touchToken)
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: touchIdentifier,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+
+        // Ending at the control's coordinate must not resurrect the cancelled sequence as upInside.
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+    }
+
+    func testControlCancellationReentryCannotContinueDragAgainstReplacementPanel() {
+        let (dragScrollView, originalPanel) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let replacementPanel = UIView(frame: originalPanel.frame)
+        control.onTouchCancel = {
+            dragScrollView.panelView = replacementPanel
+        }
+        let touch = NSObject()
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: ObjectIdentifier(touch),
+            initialLocationInHost: .zero
+        )
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+        XCTAssertTrue(dragScrollView.panelView === replacementPanel)
+        XCTAssertFalse(dragScrollView.runtime.transition.isUserDragLifecycleActive)
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testWindowRemovalInvalidatesControlTouchesBeforeReattachment() throws {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let firstTouch = NSObject()
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: ObjectIdentifier(firstTouch),
+            initialLocationInHost: .zero
+        )
+        let observer = try XCTUnwrap(
+            dragScrollView.gestureRecognizers?.compactMap {
+                $0 as? ControlTouchObserverGestureRecognizer
+            }.first
+        )
+        XCTAssertEqual(observer.liveTouchCount, 1)
+
+        dragScrollView.removeFromSuperview()
+
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+        XCTAssertEqual(observer.liveTouchCount, 0)
+        XCTAssertFalse(observer.isEnabled)
+
+        window.rootViewController?.view.addSubview(dragScrollView)
+        XCTAssertTrue(observer.isEnabled)
+        let secondTouch = NSObject()
+        let secondIdentifier = ObjectIdentifier(secondTouch)
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: secondIdentifier,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: secondIdentifier,
+            terminalLocationInHost: .zero,
+            cancelled: false
+        )
+
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel, .touchDown, .touchUpInside])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testTrackingOnlyDidEndDraggingCannotPreemptSystemCancellation() {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let touchToken = NSObject()
+        let touchIdentifier = ObjectIdentifier(touchToken)
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: touchIdentifier,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+        XCTAssertEqual(control.events, [.touchDown])
+
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: touchIdentifier,
+            terminalLocationInHost: CGPoint(x: 10, y: 10),
+            cancelled: true
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testDeferredControlCompletionAllowsReentrantProgrammaticScroll() {
+        let (dragScrollView, _) = makeHost(detents: [100, 300])
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        control.onTouchUpInside = {
+            dragScrollView.scroll(toDisplayHeight: 300, animated: false)
+        }
+        let touchToken = NSObject()
+        let touchIdentifier = ObjectIdentifier(touchToken)
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: touchIdentifier,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: touchIdentifier,
+            terminalLocationInHost: CGPoint(x: 10, y: 10),
+            cancelled: false
+        )
+
+        XCTAssertEqual(control.events, [.touchDown, .touchUpInside])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+        XCTAssertEqual(dragScrollView.displayHeight, 300, accuracy: 0.001)
+    }
+
+    func testStaleDeferredControlSettlementCannotCompleteNewerTouch() throws {
+        let dragScrollView = BODragScrollView(frame: viewport)
+        let firstControl = DeferredControlRecordingControl()
+        let secondControl = DeferredControlRecordingControl()
+        let firstTouch = NSObject()
+        let secondTouch = NSObject()
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: firstControl,
+            touchIdentifier: ObjectIdentifier(firstTouch),
+            initialLocationInHost: .zero
+        )
+        let staleID = try XCTUnwrap(dragScrollView.pendingDeferredControlInteractionID)
+        dragScrollView.cancelDeferredControlInteractionIfNeeded(expectedID: staleID)
+        dragScrollView.beginDeferredControlInteraction(
+            with: secondControl,
+            touchIdentifier: ObjectIdentifier(secondTouch),
+            initialLocationInHost: .zero
+        )
+        let currentID = try XCTUnwrap(dragScrollView.pendingDeferredControlInteractionID)
+
+        dragScrollView.completeDeferredControlInteractionIfNeeded(
+            expectedID: staleID,
+            terminalLocationInHost: .zero
+        )
+
+        XCTAssertEqual(firstControl.events, [.touchDown, .touchCancel])
+        XCTAssertEqual(secondControl.events, [.touchDown])
+        XCTAssertEqual(dragScrollView.pendingDeferredControlInteractionID, currentID)
+
+        dragScrollView.cancelDeferredControlInteractionIfNeeded(expectedID: currentID)
+        XCTAssertEqual(secondControl.events, [.touchDown, .touchCancel])
+    }
+
+    func testUnrelatedTouchCannotFinishDeferredControlInteraction() {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let owningTouch = NSObject()
+        let unrelatedTouch = NSObject()
+        let owningIdentifier = ObjectIdentifier(owningTouch)
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: owningIdentifier,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: ObjectIdentifier(unrelatedTouch),
+            terminalLocationInHost: CGPoint(x: 10_000, y: 10_000),
+            cancelled: false
+        )
+
+        XCTAssertEqual(control.events, [.touchDown])
+        XCTAssertNotNil(dragScrollView.pendingDeferredControlInteractionID)
+
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: owningIdentifier,
+            terminalLocationInHost: CGPoint(x: 10, y: 10),
+            cancelled: false
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchUpInside])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testSecondControlTouchCannotReplaceOrCancelOwningTouch() {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let firstControl = DeferredControlRecordingControl(frame: window.bounds)
+        let secondControl = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(firstControl)
+        window.rootViewController?.view.addSubview(secondControl)
+        let firstTouch = NSObject()
+        let secondTouch = NSObject()
+        let firstIdentifier = ObjectIdentifier(firstTouch)
+        let secondIdentifier = ObjectIdentifier(secondTouch)
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: firstControl,
+            touchIdentifier: firstIdentifier,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.beginDeferredControlInteraction(
+            with: secondControl,
+            touchIdentifier: secondIdentifier,
+            initialLocationInHost: .zero
+        )
+
+        XCTAssertEqual(firstControl.events, [.touchDown])
+        XCTAssertEqual(secondControl.events, [])
+        XCTAssertEqual(dragScrollView.pendingDeferredControlTouchIdentifier, firstIdentifier)
+
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: secondIdentifier,
+            terminalLocationInHost: CGPoint(x: 10_000, y: 10_000),
+            cancelled: true
+        )
+        XCTAssertEqual(firstControl.events, [.touchDown])
+
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: firstIdentifier,
+            terminalLocationInHost: CGPoint(x: 10, y: 10),
+            cancelled: false
+        )
+        XCTAssertEqual(firstControl.events, [.touchDown, .touchUpInside])
+        XCTAssertEqual(secondControl.events, [])
+    }
+
+    func testUnrelatedPanLifecycleCannotCancelStationaryOwningTouch() {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let owningTouch = NSObject()
+        let owningIdentifier = ObjectIdentifier(owningTouch)
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: owningIdentifier,
+            initialLocationInHost: .zero
+        )
+        let draggingTouch = NSObject()
+        let draggingIdentifier = ObjectIdentifier(draggingTouch)
+        _ = dragScrollView.registerControlTouchForTesting(identifier: draggingIdentifier)
+        // Both physical touches are visible to the observer, so this drag cannot be attributed to
+        // the stationary control owner. Only owner movement may cancel its synthetic sequence.
+        dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: draggingIdentifier,
+            terminalLocationInHost: .zero,
+            cancelled: true
+        )
+
+        XCTAssertEqual(control.events, [.touchDown])
+        XCTAssertEqual(dragScrollView.pendingDeferredControlTouchIdentifier, owningIdentifier)
+
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: owningIdentifier,
+            terminalLocationInHost: CGPoint(x: 10, y: 10),
+            cancelled: false
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchUpInside])
+        dragScrollView.scrollViewDidEndDragging(dragScrollView, willDecelerate: false)
+    }
+
+    func testHostCoordinateDriftCannotCancelAStationaryControlTouch() {
+        let (dragScrollView, _) = makeHost()
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let control = DeferredControlRecordingControl(frame: window.bounds)
+        window.rootViewController?.view.addSubview(control)
+        let touch = NSObject()
+        let token = dragScrollView.registerControlTouchForTesting(
+            identifier: ObjectIdentifier(touch)
+        )
+        let fixedWindowLocation = CGPoint(x: 40, y: 40)
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchToken: token,
+            initialLocationInHost: .zero,
+            initialLocationInWindow: fixedWindowLocation
+        )
+
+        // Another finger may move the scroll view's bounds while this owner finger stays fixed on
+        // screen. Drag slop must use the stable window coordinate, not the drifting host coordinate.
+        dragScrollView.bounds.origin.y += 80
+        dragScrollView.cancelDeferredControlIfOwnerBecameDrag(
+            touchToken: token,
+            locationInWindow: fixedWindowLocation
+        )
+
+        XCTAssertEqual(control.events, [.touchDown])
+        XCTAssertNotNil(dragScrollView.pendingDeferredControlInteractionID)
+        dragScrollView.cancelDeferredControlInteractionIfNeeded()
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+    }
+
+    func testAsyncDeferredControlSettlementDoesNotDecideControlAfterNewMovement() async throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard fixture.dragScrollView.responds(to: trackingDidBegin),
+              fixture.dragScrollView.responds(to: trackingDidEnd) else {
+            throw XCTSkip("This UIKit runtime cannot expose a physical tracking-only test state.")
+        }
+        defer {
+            if fixture.dragScrollView.nativeScrollState.isTracking {
+                fixture.dragScrollView.perform(trackingDidEnd)
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let control = DeferredControlRecordingControl(frame: fixture.window.bounds)
+        fixture.window.rootViewController?.view.addSubview(control)
+        let touchToken = NSObject()
+        fixture.dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: ObjectIdentifier(touchToken),
+            initialLocationInHost: .zero
+        )
+
+        fixture.dragScrollView.perform(trackingDidBegin)
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+        XCTAssertNotNil(fixture.dragScrollView.pendingDeferredControlInteractionID)
+        fixture.dragScrollView.perform(trackingDidEnd)
+
+        // Replace the old drag-release owner before its next-turn tracking settlement executes.
+        // Transition ownership is unrelated to the physical UIControl touch and must not decide it.
+        fixture.dragScrollView.scroll(toDisplayHeight: 100, animated: false)
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(control.events, [.touchDown])
+        XCTAssertNotNil(fixture.dragScrollView.pendingDeferredControlInteractionID)
+
+        fixture.dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: ObjectIdentifier(touchToken),
+            terminalLocationInHost: .zero,
+            cancelled: true
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+        XCTAssertNil(fixture.dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testScrollReplacingNativeDecelerationDoesNotCancelControlTouch() throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        defer {
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        XCTAssertTrue(fixture.dragScrollView.runtime.transition.isAwaitingDidEndDecelerating)
+
+        let control = DeferredControlRecordingControl(frame: fixture.window.bounds)
+        fixture.window.rootViewController?.view.addSubview(control)
+        let owningTouch = NSObject()
+        let owningIdentifier = ObjectIdentifier(owningTouch)
+        fixture.dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: owningIdentifier,
+            initialLocationInHost: .zero
+        )
+
+        fixture.dragScrollView.scroll(toDisplayHeight: 100, animated: false)
+
+        XCTAssertEqual(control.events, [.touchDown])
+        XCTAssertEqual(
+            fixture.dragScrollView.pendingDeferredControlTouchIdentifier,
+            owningIdentifier
+        )
+
+        fixture.dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: owningIdentifier,
+            terminalLocationInHost: .zero,
+            cancelled: true
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+    }
+
+    func testOldDecelerationSettlementCannotCancelControlDuringUnrelatedPan() async throws {
+        let fixture = try makeBottomInnerOverscrollFixture()
+        let trackingDidBegin = NSSelectorFromString("_trackingDidBegin")
+        let trackingDidEnd = NSSelectorFromString("_trackingDidEnd")
+        guard fixture.dragScrollView.responds(to: trackingDidBegin),
+              fixture.dragScrollView.responds(to: trackingDidEnd) else {
+            throw XCTSkip("This UIKit runtime cannot expose a physical tracking-only test state.")
+        }
+        defer {
+            if fixture.dragScrollView.runtime.transition.isUserDragLifecycleActive {
+                fixture.dragScrollView.scrollViewDidEndDragging(
+                    fixture.dragScrollView,
+                    willDecelerate: false
+                )
+            }
+            if fixture.dragScrollView.nativeScrollState.isTracking {
+                fixture.dragScrollView.perform(trackingDidEnd)
+            }
+            fixture.dragScrollView.endCapture()
+            fixture.window.isHidden = true
+            _ = fixture.provider
+        }
+        try beginDragDeceleration(
+            on: fixture.dragScrollView,
+            targetOffsetY: fixture.maximumOuterOffset
+        )
+        let control = DeferredControlRecordingControl(frame: fixture.window.bounds)
+        fixture.window.rootViewController?.view.addSubview(control)
+        let owningTouch = NSObject()
+        let owningIdentifier = ObjectIdentifier(owningTouch)
+        fixture.dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: owningIdentifier,
+            initialLocationInHost: .zero
+        )
+
+        fixture.dragScrollView.perform(trackingDidBegin)
+        fixture.dragScrollView.scrollViewDidEndDecelerating(fixture.dragScrollView)
+        XCTAssertNotNil(fixture.dragScrollView.pendingDeferredControlInteractionID)
+
+        let draggingTouch = NSObject()
+        let draggingIdentifier = ObjectIdentifier(draggingTouch)
+        _ = fixture.dragScrollView.registerControlTouchForTesting(identifier: draggingIdentifier)
+        // UIScrollViewDelegate has no touch identity, but the passive observer sees both live
+        // touches. Invalidating old deceleration settlement must not cancel the stationary owner.
+        fixture.dragScrollView.scrollViewWillBeginDragging(fixture.dragScrollView)
+        fixture.dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: draggingIdentifier,
+            terminalLocationInHost: .zero,
+            cancelled: true
+        )
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(control.events, [.touchDown])
+        XCTAssertEqual(
+            fixture.dragScrollView.pendingDeferredControlTouchIdentifier,
+            owningIdentifier
+        )
+
+        let insideLocationInHost = fixture.dragScrollView.convert(
+            CGPoint(x: 10, y: 10),
+            from: control
+        )
+        fixture.dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: owningIdentifier,
+            terminalLocationInHost: insideLocationInHost,
+            cancelled: false
+        )
+        XCTAssertEqual(control.events, [.touchDown, .touchUpInside])
+    }
+
     func testAccessibilityReturnsTrueWhenItExecutesWithoutDetents() {
         let (dragScrollView, _) = makeHost()
         let originalOffset = dragScrollView.contentOffset
@@ -5562,7 +6605,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let events = ReentrantDecelerationDelegate()
         dragScrollView.behaviorProvider = provider
         dragScrollView.eventDelegate = events
-        _ = dragScrollView.move(toDisplayHeight: 500, animated: false)
+        _ = dragScrollView.scroll(toDisplayHeight: 500, animated: false)
         let participant = makeScrollView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 300),
             contentHeight: 900
@@ -5588,7 +6631,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         let window = attachToWindow(dragScrollView)
         defer { window.isHidden = true }
         var previousResults: [BODragScrollMovementResult] = []
-        dragScrollView.move(
+        dragScrollView.scroll(
             toDisplayHeight: 500,
             animated: true,
             options: BODragScrollMovementOptions(style: .viewAnimation, duration: 0.5)
@@ -5612,11 +6655,24 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertFalse(recognizer.cancelsTouchesInView)
         XCTAssertFalse(recognizer.delaysTouchesEnded)
         XCTAssertTrue(recognizer.delegate === dragScrollView)
+        let controlObserver = try XCTUnwrap(
+            dragScrollView.gestureRecognizers?.compactMap {
+                $0 as? ControlTouchObserverGestureRecognizer
+            }.first
+        )
+        XCTAssertFalse(controlObserver.cancelsTouchesInView)
+        XCTAssertFalse(controlObserver.delaysTouchesEnded)
 
         dragScrollView.installInteractionSupport()
         XCTAssertEqual(
             dragScrollView.gestureRecognizers?.compactMap {
                 $0 as? TouchCompletionGestureRecognizer
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            dragScrollView.gestureRecognizers?.compactMap {
+                $0 as? ControlTouchObserverGestureRecognizer
             }.count,
             1
         )
@@ -5635,7 +6691,122 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         standalone.finishRecognition()
     }
 
-    func testStaleSystemAnimationEndDoesNotArmTouchCompletion() throws {
+    func testControlTouchObservationLossCancelsExactlyOnceAndDoesNotArmSystemAnimationTouchCompletion() throws {
+        let dragScrollView = BODragScrollView(frame: viewport)
+        let recognizer = try XCTUnwrap(
+            dragScrollView.gestureRecognizers?.compactMap {
+                $0 as? TouchCompletionGestureRecognizer
+            }.first
+        )
+        let control = DeferredControlRecordingControl()
+        let touchToken = NSObject()
+        let touchIdentifier = ObjectIdentifier(touchToken)
+        dragScrollView.beginDeferredControlInteraction(
+            with: control,
+            touchIdentifier: touchIdentifier,
+            initialLocationInHost: .zero
+        )
+
+        XCTAssertFalse(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        dragScrollView.loseControlTouchObservationForTesting()
+        dragScrollView.loseControlTouchObservationForTesting()
+
+        XCTAssertEqual(control.events, [.touchDown, .touchCancel])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testObservationLossCannotBlockTheNextControlTouch() {
+        let dragScrollView = BODragScrollView(frame: viewport)
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let firstControl = DeferredControlRecordingControl(frame: viewport)
+        let secondControl = DeferredControlRecordingControl(frame: viewport)
+        window.rootViewController?.view.addSubview(firstControl)
+        window.rootViewController?.view.addSubview(secondControl)
+        let firstTouch = NSObject()
+        let secondTouch = NSObject()
+
+        dragScrollView.beginDeferredControlInteraction(
+            with: firstControl,
+            touchIdentifier: ObjectIdentifier(firstTouch),
+            initialLocationInHost: .zero
+        )
+        dragScrollView.loseControlTouchObservationForTesting()
+
+        let secondIdentifier = ObjectIdentifier(secondTouch)
+        dragScrollView.beginDeferredControlInteraction(
+            with: secondControl,
+            touchIdentifier: secondIdentifier,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.finishDeferredControlFromTouchObserver(
+            touchIdentifier: secondIdentifier,
+            terminalLocationInHost: .zero,
+            cancelled: false
+        )
+
+        XCTAssertEqual(firstControl.events, [.touchDown, .touchCancel])
+        XCTAssertEqual(secondControl.events, [.touchDown, .touchUpInside])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testReusedTouchObjectIdentifierGetsANewTokenAndCannotFinishNewOwner() {
+        let dragScrollView = BODragScrollView(frame: viewport)
+        let window = attachToWindow(dragScrollView)
+        defer { window.isHidden = true }
+        let firstControl = DeferredControlRecordingControl(frame: viewport)
+        let secondControl = DeferredControlRecordingControl(frame: viewport)
+        window.rootViewController?.view.addSubview(firstControl)
+        window.rootViewController?.view.addSubview(secondControl)
+        let reusedTouchObject = NSObject()
+        let reusedIdentifier = ObjectIdentifier(reusedTouchObject)
+
+        let firstToken = dragScrollView.registerControlTouchForTesting(
+            identifier: reusedIdentifier
+        )
+        dragScrollView.beginDeferredControlInteraction(
+            with: firstControl,
+            touchToken: firstToken,
+            initialLocationInHost: .zero
+        )
+        dragScrollView.finishControlTouchForTesting(
+            token: firstToken,
+            identifier: reusedIdentifier,
+            locationInHost: .zero,
+            cancelled: false
+        )
+
+        let secondToken = dragScrollView.registerControlTouchForTesting(
+            identifier: reusedIdentifier
+        )
+        XCTAssertNotEqual(firstToken, secondToken)
+        dragScrollView.beginDeferredControlInteraction(
+            with: secondControl,
+            touchToken: secondToken,
+            initialLocationInHost: .zero
+        )
+
+        dragScrollView.finishControlTouchForTesting(
+            token: firstToken,
+            identifier: reusedIdentifier,
+            locationInHost: .zero,
+            cancelled: false
+        )
+        XCTAssertEqual(secondControl.events, [.touchDown])
+        XCTAssertNotNil(dragScrollView.pendingDeferredControlInteractionID)
+
+        dragScrollView.finishControlTouchForTesting(
+            token: secondToken,
+            identifier: reusedIdentifier,
+            locationInHost: .zero,
+            cancelled: false
+        )
+        XCTAssertEqual(firstControl.events, [.touchDown, .touchUpInside])
+        XCTAssertEqual(secondControl.events, [.touchDown, .touchUpInside])
+        XCTAssertNil(dragScrollView.pendingDeferredControlInteractionID)
+    }
+
+    func testDidEndScrollingAnimationAlwaysRecordsRecentTouchCompletionCandidate() throws {
         let dragScrollView = BODragScrollView(frame: viewport)
         let recognizer = try XCTUnwrap(
             dragScrollView.gestureRecognizers?.compactMap {
@@ -5647,25 +6818,54 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
 
         dragScrollView.scrollViewDidEndScrollingAnimation(dragScrollView)
 
+        XCTAssertGreaterThan(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+        XCTAssertTrue(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
         XCTAssertEqual(dragScrollView.lastSystemAnimationEndTimestamp, 0)
-        XCTAssertFalse(dragScrollView.gestureRecognizerShouldBegin(recognizer))
     }
 
-    func testReplacingSystemAnimationDriverClearsTouchCompletionTimestamp() {
+    func testReplacingSystemAnimationDriverPreservesRecentCompletionTimestamp() throws {
         let dragScrollView = BODragScrollView(frame: viewport)
+        let recognizer = try XCTUnwrap(touchCompletionRecognizer(in: dragScrollView))
         dragScrollView.runtime.transition.driver = .systemAnimation
         dragScrollView.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
 
-        // A valid callback from the old animation may have armed touch completion immediately
-        // before another movement replaces that driver. Once ownership changes, the timestamp no
-        // longer describes the current interaction and must be invalidated with the driver.
+        // OC owns this timestamp independently from the movement driver. The next should-begin
+        // decision is the only place that consumes the recent animation-end candidate.
         dragScrollView.interruptActiveMovement(outcome: .interrupted)
 
         XCTAssertNil(dragScrollView.runtime.transition.driver)
+        XCTAssertGreaterThan(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+        XCTAssertTrue(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
         XCTAssertEqual(dragScrollView.lastSystemAnimationEndTimestamp, 0)
     }
 
     // MARK: - Fixtures
+
+    private func touchCompletionRecognizer(
+        in dragScrollView: BODragScrollView
+    ) -> TouchCompletionGestureRecognizer? {
+        dragScrollView.gestureRecognizers?.compactMap {
+            $0 as? TouchCompletionGestureRecognizer
+        }.first
+    }
+
+    private func prepareRecentSystemAnimationInterruption(
+        on dragScrollView: BODragScrollView,
+        recognizer: TouchCompletionGestureRecognizer
+    ) {
+        _ = dragScrollView.scroll(toDisplayHeight: 180, animated: false)
+
+        // `scrollViewDidEndScrollingAnimation` is the OC implementation's sole source for this
+        // candidate. Do not start a real UIKit animation here: manually ending one does not cancel
+        // its private animator, which can continue mutating contentOffset after the assertion.
+        dragScrollView.scrollViewDidEndScrollingAnimation(dragScrollView)
+
+        XCTAssertGreaterThan(dragScrollView.lastSystemAnimationEndTimestamp, 0)
+        XCTAssertTrue(dragScrollView.gestureRecognizerShouldBegin(recognizer))
+        XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
+    }
 
     private func makeHost(
         detents: [CGFloat] = [],
@@ -5705,6 +6905,11 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         on dragScrollView: BODragScrollView,
         targetOffsetY: CGFloat
     ) throws {
+        // Keep every synthetic lifecycle faithful to UIKit/OC. Some tests enter with a drag already
+        // active because they delivered geometry samples first; otherwise this helper owns WBegin.
+        if !dragScrollView.runtime.transition.isUserDragLifecycleActive {
+            dragScrollView.scrollViewWillBeginDragging(dragScrollView)
+        }
         var target = CGPoint(x: dragScrollView.contentOffset.x, y: targetOffsetY)
         dragScrollView.scrollViewWillEndDragging(
             dragScrollView,
@@ -5761,7 +6966,7 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         }
         let window = attachToWindow(dragScrollView)
         XCTAssertEqual(
-            dragScrollView.move(
+            dragScrollView.scroll(
                 toDisplayHeight: initialDisplayHeight,
                 animated: false
             ),

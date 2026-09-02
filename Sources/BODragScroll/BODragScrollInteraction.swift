@@ -19,16 +19,258 @@ import UIKit.UIGestureRecognizerSubclass
 @MainActor
 final class BODragScrollInteractionState {
     fileprivate var touchCompletionGesture: TouchCompletionGestureRecognizer?
-    fileprivate weak var decelerationInterruptedControl: UIControl?
+    fileprivate var controlTouchObserver: ControlTouchObserverGestureRecognizer?
+    fileprivate var deferredControlInteraction: DeferredControlInteraction?
+    fileprivate var nextDeferredControlInteractionID: UInt64 = 1
     fileprivate var needsTouchCompletionSettlement = false
     fileprivate var didTouchWebView = false
 
     init() {}
 }
 
+/// Monotonic identity for one physical touch while it is live in the dedicated control observer.
+///
+/// `ObjectIdentifier(UITouch)` is used only as the observer's short-lived lookup key. It is never
+/// persisted as control ownership, so UIKit reusing a `UITouch` object cannot complete an older
+/// synthetic sequence.
+struct DeferredControlTouchToken: Hashable {
+    let rawValue: UInt64
+}
+
+/// One synthetic UIControl sequence started while a participant scroll view is decelerating.
+///
+/// The identifier prevents a stale terminal callback from completing a newer physical touch. The
+/// control stays weak because removing it from the hierarchy must never extend its lifetime merely
+/// to deliver a synthetic terminal event.
+@MainActor
+fileprivate final class DeferredControlInteraction {
+    let id: UInt64
+    let touchToken: DeferredControlTouchToken
+    let initialLocationInWindow: CGPoint
+    weak var control: UIControl?
+    weak var initialWindow: UIWindow?
+    weak var initialSuperview: UIView?
+
+    init(
+        id: UInt64,
+        touchToken: DeferredControlTouchToken,
+        initialLocationInWindow: CGPoint,
+        control: UIControl
+    ) {
+        self.id = id
+        self.touchToken = touchToken
+        self.initialLocationInWindow = initialLocationInWindow
+        self.control = control
+        initialWindow = control.window
+        initialSuperview = control.superview
+    }
+}
+
+// MARK: - Passive control touch observer
+
+/// Observes physical touches for synthetic UIControl delivery without ever recognizing or
+/// participating in gesture arbitration.
+///
+/// Interrupted-motion attach correction is intentionally owned by a separate recognizer. Every
+/// registered control token leaves this observer through ended, cancelled, or observation-lost
+/// exactly once, without participating in gesture arbitration.
+@MainActor
+final class ControlTouchObserverGestureRecognizer: UIGestureRecognizer {
+    struct TouchSample {
+        let token: DeferredControlTouchToken
+        let identifier: ObjectIdentifier
+        let locationInHost: CGPoint
+        let locationInWindow: CGPoint
+    }
+
+    struct TouchTerminal {
+        let sample: TouchSample
+        let cancelled: Bool
+    }
+
+    private var tokensByTouchIdentifier: [ObjectIdentifier: DeferredControlTouchToken] = [:]
+    private var nextTokenValue: UInt64 = 1
+
+    var onTouchesBegan: (([TouchSample]) -> Void)?
+    var onTouchesMoved: (([TouchSample]) -> Void)?
+    var onTouchesFinished: (([TouchTerminal]) -> Void)?
+    var onObservationLost: (([TouchSample]) -> Void)?
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesEnded = false
+    }
+
+    override func reset() {
+        super.reset()
+        invalidateObservation()
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        let samples = touches.compactMap { touch -> TouchSample? in
+            guard let token = registerIfNeeded(touchIdentifier: ObjectIdentifier(touch)) else {
+                return nil
+            }
+            return TouchSample(
+                token: token,
+                identifier: ObjectIdentifier(touch),
+                locationInHost: touch.location(in: view),
+                locationInWindow: touch.location(in: view?.window)
+            )
+        }
+        if !samples.isEmpty {
+            onTouchesBegan?(samples)
+        }
+        // Deliberately remain `.possible`. This object is an observer, not a competing gesture.
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesMoved(touches, with: event)
+        let samples = samples(for: touches)
+        if !samples.isEmpty {
+            onTouchesMoved?(samples)
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        finishTouches(touches, cancelled: false)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        finishTouches(touches, cancelled: true)
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
+    func token(for touch: UITouch) -> DeferredControlTouchToken? {
+        guard isEnabled,
+              state == .possible,
+              touch.phase != .ended,
+              touch.phase != .cancelled else { return nil }
+        return registerIfNeeded(touchIdentifier: ObjectIdentifier(touch))
+    }
+
+    func isLive(_ token: DeferredControlTouchToken) -> Bool {
+        tokensByTouchIdentifier.values.contains(token)
+    }
+
+    func token(for identifier: ObjectIdentifier) -> DeferredControlTouchToken? {
+        tokensByTouchIdentifier[identifier]
+    }
+
+    func identifier(for token: DeferredControlTouchToken) -> ObjectIdentifier? {
+        tokensByTouchIdentifier.first { $0.value == token }?.key
+    }
+
+    var liveTouchCount: Int {
+        tokensByTouchIdentifier.count
+    }
+
+    /// Internal deterministic seam for UIKit integration tests that cannot construct `UITouch`.
+    func registerTouchForTesting(identifier: ObjectIdentifier) -> DeferredControlTouchToken {
+        registerIfNeeded(touchIdentifier: identifier)!
+    }
+
+    func finishTouchForTesting(
+        token: DeferredControlTouchToken,
+        identifier: ObjectIdentifier,
+        locationInHost: CGPoint,
+        cancelled: Bool
+    ) {
+        guard tokensByTouchIdentifier[identifier] == token else { return }
+        tokensByTouchIdentifier.removeValue(forKey: identifier)
+        onTouchesFinished?([
+            TouchTerminal(
+                sample: TouchSample(
+                    token: token,
+                    identifier: identifier,
+                    locationInHost: locationInHost,
+                    locationInWindow: locationInHost
+                ),
+                cancelled: cancelled
+            )
+        ])
+    }
+
+    func loseAllTouchesForTesting() {
+        invalidateObservation()
+    }
+
+    /// Drops every locally observed touch before reporting loss. This is also used when the host is
+    /// removed from a window, where UIKit is not required to send a terminal recognizer callback.
+    func invalidateObservation() {
+        let lost = liveSamples(locationInHost: .zero)
+        tokensByTouchIdentifier.removeAll(keepingCapacity: true)
+        if !lost.isEmpty {
+            onObservationLost?(lost)
+        }
+    }
+
+    private func registerIfNeeded(
+        touchIdentifier: ObjectIdentifier
+    ) -> DeferredControlTouchToken? {
+        if let token = tokensByTouchIdentifier[touchIdentifier] {
+            return token
+        }
+        let token = DeferredControlTouchToken(rawValue: nextTokenValue)
+        nextTokenValue &+= 1
+        tokensByTouchIdentifier[touchIdentifier] = token
+        return token
+    }
+
+    private func samples(for touches: Set<UITouch>) -> [TouchSample] {
+        touches.compactMap { touch in
+            let identifier = ObjectIdentifier(touch)
+            guard let token = tokensByTouchIdentifier[identifier] else { return nil }
+            return TouchSample(
+                token: token,
+                identifier: identifier,
+                locationInHost: touch.location(in: view),
+                locationInWindow: touch.location(in: view?.window)
+            )
+        }
+    }
+
+    private func finishTouches(_ touches: Set<UITouch>, cancelled: Bool) {
+        let terminals = samples(for: touches).map {
+            TouchTerminal(sample: $0, cancelled: cancelled)
+        }
+        for touch in touches {
+            tokensByTouchIdentifier.removeValue(forKey: ObjectIdentifier(touch))
+        }
+        if !terminals.isEmpty {
+            onTouchesFinished?(terminals)
+        }
+        if tokensByTouchIdentifier.isEmpty, state == .possible {
+            state = .failed
+        }
+    }
+
+    private func liveSamples(locationInHost: CGPoint) -> [TouchSample] {
+        tokensByTouchIdentifier.map { identifier, token in
+            TouchSample(
+                token: token,
+                identifier: identifier,
+                locationInHost: locationInHost,
+                locationInWindow: locationInHost
+            )
+        }
+    }
+}
+
 // MARK: - Touch completion recognizer
 
-/// Completes a touch sequence that interrupted a native scroll animation but did not start a drag.
+/// Completes a touch sequence that interrupted panel motion but did not start a new drag.
 /// The host uses the completion to settle the panel again after the finger is lifted.
 @MainActor
 final class TouchCompletionGestureRecognizer: UIGestureRecognizer {
@@ -68,6 +310,8 @@ final class TouchCompletionGestureRecognizer: UIGestureRecognizer {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesCancelled(touches, with: event)
+        // Keep the OC recognizer's terminal mapping exactly: both ended and cancelled touches
+        // leave through the same finish routine and publish recognizer state `.ended`.
         finishTouches(touches)
     }
 
@@ -93,6 +337,11 @@ final class TouchCompletionGestureRecognizer: UIGestureRecognizer {
 // MARK: - UIKit override forwarding targets
 
 extension BODragScrollView {
+    /// Whether a tracking-only touch still intends to settle interrupted panel motion.
+    var isAwaitingTouchCompletionSettlement: Bool {
+        runtime.interaction.needsTouchCompletionSettlement
+    }
+
     var didTouchWebView: Bool {
         get { runtime.interaction.didTouchWebView }
         set { runtime.interaction.didTouchWebView = newValue }
@@ -100,7 +349,48 @@ extension BODragScrollView {
 
     /// Installs interaction support once. Called from the view's common initializer.
     func installInteractionSupport() {
-        guard runtime.interaction.touchCompletionGesture == nil else { return }
+        guard runtime.interaction.touchCompletionGesture == nil,
+              runtime.interaction.controlTouchObserver == nil else { return }
+
+        let controlObserver = ControlTouchObserverGestureRecognizer(target: nil, action: nil)
+        controlObserver.name = "BODragScrollView-ControlTouchObserver"
+        controlObserver.onTouchesBegan = { [weak self, weak controlObserver] samples in
+            guard let self, let controlObserver else { return }
+            for sample in samples {
+                self.cancelStaleDeferredControlBeforeNewTouch(
+                    newToken: sample.token,
+                    observer: controlObserver
+                )
+            }
+        }
+        controlObserver.onTouchesMoved = { [weak self] samples in
+            guard let self else { return }
+            for sample in samples {
+                self.cancelDeferredControlIfOwnerBecameDrag(
+                    touchToken: sample.token,
+                    locationInWindow: sample.locationInWindow
+                )
+            }
+        }
+        controlObserver.onTouchesFinished = { [weak self] terminals in
+            guard let self else { return }
+            for terminal in terminals {
+                self.finishDeferredControlFromTouchObserver(
+                    touchToken: terminal.sample.token,
+                    terminalLocationInHost: terminal.sample.locationInHost,
+                    cancelled: terminal.cancelled
+                )
+            }
+        }
+        controlObserver.onObservationLost = { [weak self] samples in
+            guard let self else { return }
+            let lostTokens = Set(samples.map(\.token))
+            guard let interaction = self.runtime.interaction.deferredControlInteraction,
+                  lostTokens.contains(interaction.touchToken) else { return }
+            self.cancelDeferredControlInteractionIfNeeded(expectedID: interaction.id)
+        }
+        runtime.interaction.controlTouchObserver = controlObserver
+        addGestureRecognizer(controlObserver)
 
         let gesture = TouchCompletionGestureRecognizer(
             target: self,
@@ -143,7 +433,8 @@ extension BODragScrollView {
             || nativeState.isDecelerating
         if event != nil, isInterruptingHostMotion {
             if let primary = primaryParticipantScrollView, lastMotionWasParticipant {
-                guard hierarchy(of: hitView) > 2 else {
+                let hierarchyDepth = hierarchy(of: hitView)
+                guard hierarchyDepth > 2 else {
                     return hitView
                 }
 
@@ -186,12 +477,21 @@ extension BODragScrollView {
         if lastMotionWasParticipant,
            primaryParticipantScrollView != nil,
            nativeState.isDecelerating,
+           hierarchy(of: view) == 1,
            let control = view as? UIControl,
-           hierarchy(of: view) == 1 {
-            // UIScrollView suppresses this control sequence when the touch stops participant inertia.
-            // Begin it manually; `finishDeferredControlInteraction()` delivers the matching end.
-            runtime.interaction.decelerationInterruptedControl = control
-            control.sendActions(for: .touchDown)
+           touches.count == 1,
+           let touch = touches.first,
+           let observer = runtime.interaction.controlTouchObserver,
+           let touchToken = observer.token(for: touch) {
+            // Match the OC compatibility boundary: only a control outside the decelerating
+            // participant gets a synthetic sequence. Controls inside the participant remain under
+            // UIKit's ordinary "stop inertia without activating content" behavior.
+            beginDeferredControlInteraction(
+                with: control,
+                touchToken: touchToken,
+                initialLocationInHost: touch.location(in: self),
+                initialLocationInWindow: touch.location(in: window)
+            )
         }
 
         let touchedWebView = beginCapture(from: view)
@@ -206,19 +506,231 @@ extension BODragScrollView {
         true
     }
 
-    /// Completes the UIControl sequence begun while participant inertia was being interrupted.
-    /// Transition calls this from the outer scroll view's did-end-dragging callback.
-    func finishDeferredControlInteraction() {
-        guard let control = runtime.interaction.decelerationInterruptedControl else { return }
-        defer { runtime.interaction.decelerationInterruptedControl = nil }
-
-        let point = panGestureRecognizer.location(in: window)
-        let controlRect = control.convert(control.bounds, to: window)
-        control.sendActions(for: controlRect.contains(point) ? .touchUpInside : .touchUpOutside)
+    /// Identifier of the synthetic sequence owned by the current physical touch, if any.
+    var pendingDeferredControlInteractionID: UInt64? {
+        runtime.interaction.deferredControlInteraction?.id
     }
 
-    /// Cancels the touch-completion fallback when an actual drag has taken responsibility for settling.
-    /// Transition calls this from the outer scroll view's will-begin-dragging callback.
+    var pendingDeferredControlTouchToken: DeferredControlTouchToken? {
+        runtime.interaction.deferredControlInteraction?.touchToken
+    }
+
+    /// Compatibility seam for the existing deterministic UIKit tests. Production ownership remains
+    /// token-based; the physical object identifier never leaves the observer's live lookup table.
+    var pendingDeferredControlTouchIdentifier: ObjectIdentifier? {
+        guard let token = pendingDeferredControlTouchToken else { return nil }
+        return runtime.interaction.controlTouchObserver?.identifier(for: token)
+    }
+
+    private func cancelStaleDeferredControlBeforeNewTouch(
+        newToken: DeferredControlTouchToken,
+        observer: ControlTouchObserverGestureRecognizer
+    ) {
+        guard let interaction = runtime.interaction.deferredControlInteraction,
+              interaction.touchToken != newToken,
+              !observer.isLive(interaction.touchToken) else { return }
+        cancelDeferredControlInteractionIfNeeded(expectedID: interaction.id)
+    }
+
+    // Internal deterministic seams for UIKit tests, which cannot construct `UITouch` instances.
+    func registerControlTouchForTesting(
+        identifier: ObjectIdentifier
+    ) -> DeferredControlTouchToken {
+        runtime.interaction.controlTouchObserver!.registerTouchForTesting(identifier: identifier)
+    }
+
+    func finishControlTouchForTesting(
+        token: DeferredControlTouchToken,
+        identifier: ObjectIdentifier,
+        locationInHost: CGPoint,
+        cancelled: Bool
+    ) {
+        runtime.interaction.controlTouchObserver?.finishTouchForTesting(
+            token: token,
+            identifier: identifier,
+            locationInHost: locationInHost,
+            cancelled: cancelled
+        )
+    }
+
+    func loseControlTouchObservationForTesting() {
+        runtime.interaction.controlTouchObserver?.loseAllTouchesForTesting()
+    }
+
+    func beginDeferredControlInteraction(
+        with control: UIControl,
+        touchIdentifier: ObjectIdentifier,
+        initialLocationInHost: CGPoint
+    ) {
+        let token = registerControlTouchForTesting(identifier: touchIdentifier)
+        beginDeferredControlInteraction(
+            with: control,
+            touchToken: token,
+            initialLocationInHost: initialLocationInHost
+        )
+    }
+
+    func finishDeferredControlFromTouchObserver(
+        touchIdentifier: ObjectIdentifier,
+        terminalLocationInHost: CGPoint,
+        cancelled: Bool
+    ) {
+        guard let observer = runtime.interaction.controlTouchObserver,
+              let token = observer.token(for: touchIdentifier) else { return }
+        observer.finishTouchForTesting(
+            token: token,
+            identifier: touchIdentifier,
+            locationInHost: terminalLocationInHost,
+            cancelled: cancelled
+        )
+    }
+
+    func cancelDeferredControlIfOwnerBecameDrag(
+        touchIdentifier: ObjectIdentifier,
+        locationInHost: CGPoint
+    ) {
+        guard let token = runtime.interaction.controlTouchObserver?.token(for: touchIdentifier) else {
+            return
+        }
+        cancelDeferredControlIfOwnerBecameDrag(
+            touchToken: token,
+            locationInWindow: locationInHost
+        )
+    }
+
+    /// Starts the UIControl sequence that UIKit suppresses when this touch first stops participant
+    /// inertia. Any older unfinished sequence is cancelled before the new touch becomes owner.
+    func beginDeferredControlInteraction(
+        with control: UIControl,
+        touchToken: DeferredControlTouchToken,
+        initialLocationInHost: CGPoint,
+        initialLocationInWindow: CGPoint? = nil
+    ) {
+        if runtime.interaction.deferredControlInteraction?.control == nil {
+            runtime.interaction.deferredControlInteraction = nil
+        }
+        guard let observer = runtime.interaction.controlTouchObserver,
+              observer.isLive(touchToken) else { return }
+        if let existing = runtime.interaction.deferredControlInteraction {
+            // A genuinely simultaneous second finger cannot steal the first control sequence.
+            if observer.isLive(existing.touchToken) {
+                return
+            }
+            // Observation of the old physical sequence has already ended. Never let that orphan
+            // block a later tap: cancel it exactly once before the new touch becomes owner.
+            cancelDeferredControlInteractionIfNeeded(expectedID: existing.id)
+        }
+        guard runtime.interaction.deferredControlInteraction == nil,
+              observer.isLive(touchToken) else { return }
+
+        // Generic motion repair and synthetic control delivery are independent. Keep the repair
+        // armed until touch-up: a control that starts scroll(to:) supersedes it by transaction
+        // generation, while a control with no panel movement still leaves the interrupted panel
+        // responsible for returning to a legal detent.
+
+        let id = runtime.interaction.nextDeferredControlInteractionID
+        runtime.interaction.nextDeferredControlInteractionID &+= 1
+        runtime.interaction.deferredControlInteraction = DeferredControlInteraction(
+            id: id,
+            touchToken: touchToken,
+            initialLocationInWindow: initialLocationInWindow ?? initialLocationInHost,
+            control: control
+        )
+        control.sendActions(for: .touchDown)
+    }
+
+    /// Completes only from the terminal callback of the same physical touch that began the
+    /// synthetic sequence. Clearing ownership before target-action delivery makes re-entrant
+    /// programmatic scrolling safe.
+    func completeDeferredControlInteractionIfNeeded(
+        expectedID: UInt64? = nil,
+        terminalLocationInHost: CGPoint
+    ) {
+        guard let interaction = takeDeferredControlInteraction(expectedID: expectedID),
+              let control = interaction.control else { return }
+        guard let initialWindow = interaction.initialWindow,
+              control.window === initialWindow,
+              control.superview === interaction.initialSuperview,
+              control.isEnabled,
+              control.isUserInteractionEnabled,
+              !control.isHidden,
+              control.alpha > 0.01 else {
+            control.sendActions(for: .touchCancel)
+            return
+        }
+
+        let pointInControl = control.convert(terminalLocationInHost, from: self)
+        control.sendActions(
+            for: control.point(inside: pointInControl, with: nil) ? .touchUpInside : .touchUpOutside
+        )
+    }
+
+    /// Cancels the synthetic control sequence as soon as the touch becomes a real drag. A drag must
+    /// never be converted back into `.touchUpInside`, even if it finishes inside the control bounds.
+    func cancelDeferredControlInteractionIfNeeded(expectedID: UInt64? = nil) {
+        guard let interaction = takeDeferredControlInteraction(expectedID: expectedID) else { return }
+        interaction.control?.sendActions(for: .touchCancel)
+    }
+
+    /// UIControl compatibility owns its own touch-slop decision. UIScrollView delegate callbacks do
+    /// not expose which finger began the pan, so they cannot safely cancel a sequence owned by a
+    /// different stationary finger.
+    func cancelDeferredControlIfOwnerBecameDrag(
+        touchToken: DeferredControlTouchToken,
+        locationInWindow: CGPoint
+    ) {
+        guard let interaction = runtime.interaction.deferredControlInteraction,
+              interaction.touchToken == touchToken else { return }
+        let dx = locationInWindow.x - interaction.initialLocationInWindow.x
+        let dy = locationInWindow.y - interaction.initialLocationInWindow.y
+        let dragCancellationDistance: CGFloat = 10
+        guard hypot(dx, dy) >= dragCancellationDistance else { return }
+        cancelDeferredControlInteractionIfNeeded(expectedID: interaction.id)
+    }
+
+    /// UIScrollView does not identify the finger that crossed its pan threshold. When exactly one
+    /// physical touch is live and it owns the control sequence, the ownership is unambiguous and the
+    /// drag must cancel immediately rather than waiting for a hard-coded movement distance.
+    func cancelDeferredControlIfOnlyLiveTouchBecameDrag() {
+        guard let interaction = runtime.interaction.deferredControlInteraction,
+              let observer = runtime.interaction.controlTouchObserver,
+              observer.liveTouchCount == 1,
+              observer.isLive(interaction.touchToken) else { return }
+        cancelDeferredControlInteractionIfNeeded(expectedID: interaction.id)
+    }
+
+    /// Detaches all control-touch ownership before UIKit begins removing the host from its window.
+    /// The returned callback delivers the sole terminal event only after transition cleanup has
+    /// detached its old owners, so target-action re-entry cannot be overwritten by removal state.
+    func prepareDeferredControlCancellationForRemoval() -> (() -> Void)? {
+        let interaction = takeDeferredControlInteraction(expectedID: nil)
+        if let observer = runtime.interaction.controlTouchObserver {
+            observer.invalidateObservation()
+            observer.isEnabled = false
+        }
+        guard let control = interaction?.control else { return nil }
+        return { [weak control] in
+            control?.sendActions(for: .touchCancel)
+        }
+    }
+
+    func resumeControlTouchObservationAfterWindowAttachment() {
+        runtime.interaction.controlTouchObserver?.isEnabled = true
+    }
+
+    private func takeDeferredControlInteraction(
+        expectedID: UInt64?
+    ) -> DeferredControlInteraction? {
+        guard let interaction = runtime.interaction.deferredControlInteraction else { return nil }
+        if let expectedID, interaction.id != expectedID {
+            return nil
+        }
+        runtime.interaction.deferredControlInteraction = nil
+        return interaction
+    }
+
+    /// Cancels the narrow touch-completion fallback when a real drag takes responsibility for the
+    /// panel, matching OC `scrollViewWillBeginDragging`.
     func cancelPendingTouchCompletionSettlement() {
         guard runtime.interaction.needsTouchCompletionSettlement else { return }
         runtime.interaction.needsTouchCompletionSettlement = false
@@ -342,18 +854,33 @@ extension BODragScrollView {
 
     /// Correctly accepts the recognizer's base type; this is not a `UITapGestureRecognizer`.
     @objc func interaction_handleTouchCompletion(_ gestureRecognizer: UIGestureRecognizer) {
-        let nativeState = nativeScrollState
         guard runtime.interaction.needsTouchCompletionSettlement,
-              gestureRecognizer.state == .ended,
-              !nativeState.isDecelerating else {
-            return
-        }
+              gestureRecognizer.state == .ended else { return }
+        guard !nativeScrollState.isDecelerating else { return }
 
-        settleToNearestDetent(
-            animated: true,
-            options: BODragScrollMovementOptions(),
-            completion: nil
-        )
+        // This is the OC `onTapGes:` settlement boundary. `.began` must not consume the flag: only
+        // the terminal `.ended` action repairs interrupted panel motion that did not become
+        // a real drag. `scrollViewWillBeginDragging` owns the mutually exclusive drag path.
+        settleInterruptedSystemAnimationToNearestDetentIfNeeded()
+    }
+
+    /// Terminal path for the passive observer. Only the UITouch that began this synthetic sequence
+    /// may finish it; unrelated fingers cannot supply its outcome or endpoint.
+    func finishDeferredControlFromTouchObserver(
+        touchToken: DeferredControlTouchToken,
+        terminalLocationInHost: CGPoint,
+        cancelled: Bool
+    ) {
+        guard let interaction = runtime.interaction.deferredControlInteraction,
+              interaction.touchToken == touchToken else { return }
+        if cancelled {
+            cancelDeferredControlInteractionIfNeeded(expectedID: interaction.id)
+        } else {
+            completeDeferredControlInteractionIfNeeded(
+                expectedID: interaction.id,
+                terminalLocationInHost: terminalLocationInHost
+            )
+        }
     }
 }
 
@@ -614,7 +1141,7 @@ private extension BODragScrollView {
     }
 
     func moveForAccessibility(toDisplayHeight targetHeight: CGFloat) {
-        move(
+        requestMovement(
             toDisplayHeight: targetHeight,
             animated: true,
             options: BODragScrollMovementOptions(),

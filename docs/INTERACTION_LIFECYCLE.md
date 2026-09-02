@@ -186,6 +186,11 @@ outer contentOffset.y = proposedDisplayHeight - bounds.height
 
 ### 5.2 惯性期间选择谁接收中断触摸
 
+`hitTest` 只负责把这一次触摸路由给合适的 UIKit 接收者；它不记录原生减速、不会 arm
+touch-completion，也不做 transaction/capture 的补偿或清理。原生减速的正常目标已在
+`scrollViewWillEndDragging` 写入，并由 `scrollViewDidEndDecelerating` 收尾；这条 native drag
+deceleration 链不会为 touch-completion arm 候选，也不会因为 hit-test 路由结果重新 attach。
+
 若 host 正在 view transition、system-scroll transition 或原生减速：
 
 - 最近一次运动来自 participant：触摸落在主参与者深层内容时，返回命中路径上最近的嵌套 scroll view；找不到则返回主参与者。这样中断惯性不会误触下面的 control 或 Web 内容。
@@ -384,14 +389,29 @@ Touch-completion recognizer 始终允许 simultaneous。减速期间的 tap 是�
 真实 host drag 开始时，Transition 层按顺序：
 
 1. 标记 user-drag 生命周期活动；此阶段请求的程序化 movement 延迟到 did-end 之后。
-2. 若上一次 UIKit 减速没有交付终止回调，先补齐 participant 和 event delegate 的 `didEndDecelerating`。
-3. 取消 touch-completion fallback。
-4. 中断当前程序化/动画 movement。
-5. 在旧减速补完和旧 movement completion 之后分别复核 window、panel 身份与 replacement generation；回调若已换掉层级，本次 begin 立即停止。
+2. 立即取消 touch-completion fallback；从这一节点起由真实 drag 负责落点，且取消发生在任何外部回调之前。
+3. 若上一轮仍由 native `.dragDeceleration` 驱动，只中断旧 `.dragRelease`
+   transaction 并释放 Swift 的 driver/monitor owner，使本轮 release 可以建立自己的 owner。
+   这一步不合成 participant/event delegate 的 `didEndDecelerating`，也绝不调用
+   `setContentOffset`；UIKit 仍以当前真实 offset 继续同一段 native 运动。
+4. 中断其他当前程序化/动画 movement。
+5. 在旧 movement completion 之后复核 window、panel 身份与 replacement generation；
+   回调若已换掉层级，本次 begin 立即停止。
 6. dirty、不同 sibling chain 等待处理时建立 fresh session；否则对符合条件的连续自由轴执行一次无回调重基检查。
 7. 记录本次 drag 拥有的 capture session/generation，用于终止时只清理自己的 session。
 8. 只有当前模型含 participant segments 时，才把完整 drag 生命周期绑定并转发给主参与者。
 9. 依次调用主参与者 delegate `scrollViewWillBeginDragging`、组件 `eventDelegate`，并在每个外部回调边界后复核层级；若中途失效，只为已经发送的 begin 补齐对应 end。
+
+减速中第二次触摸继续形成 native drag 时，UIKit 回调保持与 OC 相同的连续结构：
+
+```text
+willBeginDragging #1 → willEndDragging #1 → didEndDragging #1 (decelerate)
+willBeginDragging #2 → willEndDragging #2 → didEndDragging #2 (decelerate)
+                                                        → didEndDecelerating (唯一真实回调)
+```
+
+两轮 drag 的 will/did 回调都如实转发；第二轮 `willBeginDragging` 不在中间插入伪造的
+`didEndDecelerating`。
 
 `touchesShouldBegin` 通常已为新触摸建立或刷新模型，`willBeginDragging` 不再无条件 reload。旧物理轴
 仍被上一轮减速/回弹拥有时，dirty 模型、不同 sibling chain 或拒绝捕获等不兼容结果都只记录待捕获
@@ -472,7 +492,7 @@ Touch-completion recognizer 始终允许 simultaneous。减速期间的 tap 是�
 
 1. 将回调转发给绑定的主参与者 delegate。
 2. 通知组件 event delegate。
-3. 完成可能由惯性中断触发的 UIControl 序列。
+3. UIControl 的 synthetic 序列不由该回调决定；它在真实 drag 开始时发送 `.touchCancel`，或在抬起/系统取消时发送对应终态。
 4. 若不减速且 host 已在合法轴内，以 `settled` 方式结束本次 drag 真正拥有的 capture，并完成 release transaction。
 5. 若不减速但 host 仍表示 panel/participant bounce，保留 capture 和 transaction；终止回调退出后的下一主队列 turn 让 host `UIScrollView` 动画回边界，participant 只通过普通 `didScroll` 投影逐帧移动。
 6. 若要减速，保留 capture/model 和 participant lifecycle，等待终止回调。
@@ -480,12 +500,18 @@ Touch-completion recognizer 始终允许 simultaneous。减速期间的 tap 是�
 
 ### 12.2 `scrollViewDidEndDecelerating`
 
-仅在确实等待减速结束且 host 已不再 decelerating 时接受。UIKit 可能在新手指已经 tracking、但尚未形成新 drag 时交付旧减速唯一一次终止回调；此时先配对生命周期通知，但延后 capture/transaction 清理，直到 tracking 结束或新 drag 正式接管。
+仅在 UIKit 真实交付回调且 host 已不再 decelerating 时接受。native deceleration
+中的新一轮 `willBeginDragging` 不主动调用此方法；连续 native lifecycle 在最后停止时只消费
+UIKit 发送的唯一一次真实终止回调。若它到来时新手指仍在 tracking，先如实转发生命周期通知，
+但延后 capture/transaction 清理，直到 tracking 结束或新 drag 正式接管。
 
 1. 转发主参与者 `scrollViewDidEndDecelerating`。
 2. 通知组件 event delegate。
 3. tracking 已结束且已归边时 settled teardown；若仍 tracking，或 UIKit 报告减速结束后 host 仍越界，则进入统一的异步 settlement。
 4. settlement 等待 host 退出 tracking/decelerating；有越界时由 host 的系统滚动回到标准边界，真实稳定后才完成 `.dragDeceleration` transaction。
+
+正常原生减速的 target 在 `scrollViewWillEndDragging` 已确定；`scrollViewDidEndDecelerating`
+只完成该次生命周期，绝不重新 attach、重新求 detent，或由一次 tap-only 触摸改写目标。
 
 UIKit 在取消/中断手势时可能省略 `willEndDragging`，此时存在原生 `.dragDeceleration` driver，但没有 movement transaction。driver 及其 monitor keys 由独立的原子清理方法释放，不依赖 transaction。若该终止回调恰好落在新手指的 tracking 阶段，先清旧 driver、保留刷新后的 capture；新手指形成 drag 时直接接管，只是短按则在抬起后按 capture generation 安全释放。
 
@@ -497,7 +523,9 @@ UIKit 在取消/中断手势时可能省略 `willEndDragging`，此时存在原�
 - 已捕获层级本身失效、panel/window 失效时强制关闭旧 owner；
 - 迟到的旧 `didEndDecelerating`、动画结束回调或 settlement sample 必须同时通过 transaction、driver、session ID 和 generation 校验，否则没有清理权限。
 
-新触摸或程序化 movement 可以在 UIKit 漏掉终止回调时主动关闭旧减速生命周期，但每一组实际发送过的 participant/event begin 都最多配对一次 end。
+新 native 触摸/drag 本身不会在 UIKit 漏掉终止回调时合成旧轮
+`didEndDecelerating`。程序化 movement、布局中断、window removal 等明确取得物理所有权的路径
+仍可主动关闭旧减速生命周期，但每一组实际发送过的 participant/event begin 都最多配对一次 end。
 
 ## 13. 系统动画、UIView 动画与 transaction
 
@@ -522,7 +550,7 @@ movement 在以下窗口不会立刻重入：
 
 ### 13.2 程序化移动
 
-`move(toDisplayHeight:)` 是 panel-only 绝对语义：
+`scroll(toDisplayHeight:)` 是 panel-only 绝对语义：
 
 1. 暂停新的 capture acquisition。
 2. 结束当前 capture，移除 participant 距离。
@@ -548,9 +576,9 @@ movement 在以下窗口不会立刻重入：
 系统滚动和 scroll-to-top 不依赖单个 UIKit completion callback；Transition 层记录 transaction ID、
 driver、目标、起点和是否观察到真实进度，并持续采样 settlement，防止漏回调或陈旧回调完成后来
 的 movement。`scrollViewDidEndScrollingAnimation` 没有动画标识：只有当前 driver 仍是
-`.systemAnimation` 且 transaction ID 与该 driver 的记录一致时，它才能更新时间提示并唤醒当前监控；
-其他回调只按 UIScrollViewDelegate 的事件语义向外转发，对内部状态没有影响。即使匹配，该回调也
-不能单独证明动画已经结束。
+`.systemAnimation` 且 transaction ID 与该 driver 的记录一致时，它才能唤醒当前 transaction 的监控；
+但 OC 兼容的触摸补完时间戳属于 UIKit 事件本身，因此每次该 delegate 回调都会在向外转发后记录。
+即使匹配，该回调也不能单独证明 transaction 已经结束。
 
 settlement 监控只根据 transaction 身份、真实 `contentOffset`、scroll callback epoch 和
 UIKit 稳定状态判定 completed/interrupted；正常动画完成不会再修正 offset/frame，也不生成另一份
@@ -567,27 +595,44 @@ metrics reload；新拖动中断一次纯 panel-to-panel 动画也不会被误�
 
 ## 14. 系统时机补完 recognizer
 
-`TouchCompletionGestureRecognizer` 不是 `UITapGestureRecognizer`。它解决的情况是：
+`TouchCompletionGestureRecognizer` 不是 `UITapGestureRecognizer`。它只复制 OC 中
+system-scroll animation 刚交付结束回调后的触摸补完节点，不扩展到 native drag deceleration：
 
-1. 一次触摸中断了系统滚动动画；
-2. UIKit 刚为当前仍被组件持有的 system-animation driver 交付
-   `scrollViewDidEndScrollingAnimation`；
-3. 这次触摸没有继续成为真实拖动；
-4. 手指随后抬起。
+1. `scrollViewDidEndScrollingAnimation` 先完成 delegate 转发，然后无条件记录结束时间。
+2. recognizer 的 `shouldBegin` 是唯一 arm 节点：仅当该时间戳存在且距当前
+   `< 0.1s` 时设置 `needsTouchCompletionSettlement = true`，否则设为 false；无论是否命中，
+   都立即消费并清空该时间戳。
+3. recognizer 在 touch down 进入 `.began`；target-action 在 `.began` 不 attach、不求解落点。
+4. touch ended 与 touch cancelled 都经过同一 finish 节点；多指时等到所有手指离开后进入
+   `.ended`。
+5. target-action 仅在
+   `needsTouchCompletionSettlement == true && state == .ended && !isDecelerating` 时，以当前 offset
+   和零速度调用普通 attach 求解，再按求解结果执行动画落点。
+6. 若本次触摸形成真实 drag，`scrollViewWillBeginDragging` 立即清除该候选并
+   结束 completion recognizer；后续落点完全由新一次 `scrollViewWillEndDragging` 处理。
 
-若动画结束时间距 shouldBegin 小于 0.1 秒，recognizer 接管这个 completion 时机；结束时调用
-`settleToNearestDetent`。driver 被完成、中断或替换时会与其监控键一起清除此时间戳，旧动画不能影响
-新触摸。如果真实 `scrollViewWillBeginDragging` 到来，立即取消 fallback，避免重复吸附。
+native `.dragDeceleration` 不是候选来源，不检查 participant segment，不读取
+movement owner，也不绑定 transaction ID/epoch。原始 drag release 的落点只由
+`scrollViewWillEndDragging` 写入的 target 管理；`scrollViewDidEndDecelerating` 只完成生命周期，
+绝不 attach 或重新求 detent。显式 `scroll(toDisplayHeight:)` 也不轮询、等待或参与这条判定链。
 
-recognizer 不取消 view touches，支持多指并等到所有手指结束。
+候选判定和 attach 都只属于 recognizer 上述事件链；`hitTest` 只负责触摸路由，
+不建立、完成或延迟 touch-completion，也不修改 native deceleration target。
+transaction owner 的完成、中断或替换只清理各自的 monitor keys，不参与这个时间戳的
+arm/消费。候选 flag 不是 movement owner，不会阻塞最终 idle 发布。
+
+recognizer 不取消 view touches，支持多指并等到所有手指结束；系统 cancelled 也按 OC 映射为该
+recognizer 的 `.ended`。这只影响面板吸附补完，不改变第 15 节独立 UIControl observer 的
+`.touchCancel` 语义。
 
 ## 15. UIControl 特殊行为
 
 当 participant 惯性被 panel 内、但主参与者外部的 `UIControl` 触摸中断时，`UIScrollView` 可能吞掉 control 的正常序列。组件会：
 
-1. 在 `touchesShouldBegin` 手动发送 `.touchDown`。
-2. 保存弱引用，不阻止 control 释放。
-3. 在外层 `scrollViewDidEndDragging` 根据手指最终是否仍在 control bounds 内发送 `.touchUpInside` 或 `.touchUpOutside`。
+1. `touchesShouldBegin` 手动发送 `.touchDown`，并保存 weak control 引用，不阻止 control 释放。
+2. 同一触摸形成真实 drag 时发送 `.touchCancel`；直接抬起时按最终位置发送 `.touchUpInside` 或 `.touchUpOutside`，系统取消时发送 `.touchCancel`。
+3. 这套 synthetic UIControl 序列独立于第 14 节：它不由 `hitTest` 建立，也不会 arm、取消或完成
+   touch-completion fallback。
 
 深层 participant 内容中的 control 在惯性中断时不会误触，因为 hit-test 会先把触摸交给最近 scroll view。
 
@@ -693,6 +738,8 @@ bridge 是进程级永久 getter hook，只安装一次，不提供运行时卸�
 - `didScroll` 是滚动事件，每个有效系统回调如实发布，不按高度去重。
 - drag/deceleration 回调是 UIKit 生命周期事件，不做值去重。
 - `willMoveToDisplayHeight` / `didFinishMovement` 是 transaction 事件，同高度目标仍可产生。
+- `didBecomeIdleAtDisplayHeight` 是跨 transaction 与 UIKit 生命周期的整批运动终点；所有 owner、
+  bounce 回位和延迟移动都释放后，在下一次主线程调度中合并发布一次。
 
 ### 19.3 DEBUG diagnostics
 

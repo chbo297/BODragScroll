@@ -11,6 +11,7 @@ enum DemoScenarioUnderTest: Int, CaseIterable {
     case policyLab
     case webContent
     case controlsAndGestures
+    case decelerationControlLab
 
     var name: String {
         switch self {
@@ -23,6 +24,7 @@ enum DemoScenarioUnderTest: Int, CaseIterable {
         case .policyLab: return "policy-lab"
         case .webContent: return "web-content"
         case .controlsAndGestures: return "controls-and-gestures"
+        case .decelerationControlLab: return "deceleration-control-lab"
         }
     }
 
@@ -37,6 +39,9 @@ enum DemoScenarioUnderTest: Int, CaseIterable {
         case .policyLab: return 330
         case .webContent: return 260
         case .controlsAndGestures: return 310
+        // The lab authors `viewportSize.height`; this sentinel is clamped by
+        // `expectedInitialDisplayHeight` to the current test device's viewport.
+        case .decelerationControlLab: return .greatestFiniteMagnitude
         }
     }
 }

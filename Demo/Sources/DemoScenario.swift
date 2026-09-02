@@ -100,6 +100,13 @@ enum DemoCatalog {
                     symbolName: "hand.tap.fill",
                     tint: DemoPalette.pink,
                     makeViewController: { ControlsAndGesturesViewController(implementation: $0) }
+                ),
+                DemoScenario(
+                    title: "惯性中的 UIControl",
+                    subtitle: "固定、悬浮和列表内 UIButton/UIControl 的点击与取消语义",
+                    symbolName: "hand.raised.fill",
+                    tint: DemoPalette.orange,
+                    makeViewController: { DecelerationControlLabViewController(implementation: $0) }
                 )
             ]
         )

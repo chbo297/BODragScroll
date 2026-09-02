@@ -38,7 +38,7 @@ public enum BODragScrollMovementOutcome: Sendable, Equatable {
     case interrupted
 }
 
-/// Options for `move(toDisplayHeight:animated:options:completion:)`.
+/// Options for `scroll(toDisplayHeight:animated:options:completion:)`.
 public struct BODragScrollMovementOptions {
     /// `.automatic` uses the behavior provider and then `configuration.movement.defaultStyle`.
     public var style: BODragScrollMovementStyle
@@ -567,6 +567,14 @@ public protocol BODragScrollEventDelegate: AnyObject {
         didChangeDisplayHeight displayHeight: CGFloat
     )
 
+    /// Called once after the latest drag, deceleration, animation, bounce return, or deferred
+    /// movement has completely stopped. This is a lifecycle event and may carry the same height as
+    /// the preceding value-change callback.
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        didBecomeIdleAtDisplayHeight displayHeight: CGFloat
+    )
+
     /// A scrolling-event notification. Each host scroll event accepted by the engine is forwarded;
     /// it is not coalesced merely because the display height is unchanged.
     func dragScrollView(
@@ -607,6 +615,11 @@ public extension BODragScrollEventDelegate {
     func dragScrollView(
         _ dragScrollView: BODragScrollView,
         didChangeDisplayHeight displayHeight: CGFloat
+    ) {}
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        didBecomeIdleAtDisplayHeight displayHeight: CGFloat
     ) {}
 
     func dragScrollView(

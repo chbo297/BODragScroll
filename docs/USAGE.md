@@ -62,7 +62,7 @@ func dragScrollView(
 
 示例把 host 全高作为业务的最大面板高度。这只是一种布局选择；业务可以返回其他固定尺寸，组件不替业务决定视觉上限。
 
-首次展示高度应直接写入 `proposedDisplayHeight`，不要在回调中调用 `move(...)`。后续布局一般保留传入值，只在新的业务尺寸范围内做约束。`detentHeights` 应按变化设置，避免每次布局重复触发配置刷新。
+首次展示高度应直接写入 `proposedDisplayHeight`，不要在回调中调用 `scroll(...)`。后续布局一般保留传入值，只在新的业务尺寸范围内做约束。`detentHeights` 应按变化设置，避免每次布局重复触发配置刷新。
 
 ### 2.2 默认交接策略
 
@@ -82,12 +82,12 @@ dragScrollView.configuration = configuration
 
 这些值本身就是默认配置。示例显式设置是为了让行为一目了然；如果使用默认行为，可以完全不写这段配置。
 
-## 3. 程序化移动
+## 3. 程序化滚动
 
-### 3.1 移动到指定展示高度
+### 3.1 滚动到指定展示高度
 
 ```swift
-dragScrollView.move(
+dragScrollView.scroll(
     toDisplayHeight: targetHeight,
     animated: true,
     options: .init(style: .automatic)
@@ -142,6 +142,13 @@ extension DemoViewController: BODragScrollEventDelegate {
     ) {
         print(result.reason, result.outcome)
     }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
+        didBecomeIdleAtDisplayHeight displayHeight: CGFloat
+    ) {
+        commitStableBusinessState(at: displayHeight)
+    }
 }
 ```
 
@@ -153,7 +160,9 @@ dragScrollView.eventDelegate = self
 
 - `didChangeDisplayHeight` 具有值变化语义，只在展示高度确实变化时发布。
 - `didScroll` 具有滚动事件语义，不会因为展示高度相同而过滤。
-- `didFinishMovement` 与对应 `move` completion 对同一移动事务都最多调用一次。
+- `didFinishMovement` 与对应 `scroll` completion 对同一移动事务都最多调用一次。
+- `didBecomeIdleAtDisplayHeight` 具有整批运动生命周期语义：拖拽、减速、动画、bounce 回位和期间接受的延迟移动全部结束后发布一次，最终高度未变化时也会发布。
+- `isMovementActive` 表示本批运动是否尚未发布最终 idle 事件；布局或业务配置变化时，可用它避免读取或重复提交中间态。
 
 不要设置继承自 `UIScrollView` 的 `delegate`；它由组件内部持有。
 

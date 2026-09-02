@@ -66,6 +66,7 @@ final class BODragScrollMovementTransaction {
         )
         dragScrollView.eventDelegate?.dragScrollView(dragScrollView, didFinishMovement: result)
         completion?(result)
+        dragScrollView.scheduleMovementIdlePublicationIfNeeded()
     }
 }
 
@@ -135,24 +136,92 @@ final class BODragScrollTransitionState {
     var movementsDeferredUntilDragEnds: [() -> Void] = []
     var isDrainingDragDeferredMovements = false
     var isAwaitingDidEndDecelerating = false
+
+    /// A movement or drag began after the most recently published idle event.
+    var hasUnpublishedMovementActivity = false
+
+    /// Coalesces all UIKit and transaction terminal callbacks onto one next-turn idle check.
+    var isIdlePublicationScheduled = false
+}
+
+// MARK: - Unified movement activity
+
+@MainActor
+extension BODragScrollView {
+    /// One authoritative activity predicate shared by the public API and final idle publication.
+    var hasActiveMovementOwner: Bool {
+        let transition = runtime.transition
+        let nativeState = nativeScrollState
+        // `isTracking` alone is only a touch-down. The OC touch-completion candidate is deliberately
+        // not a movement owner: it remains true after `.ended` until the next should-begin/drag.
+        return transition.activeTransaction != nil
+            || transition.pendingLayoutMovement != nil
+            || !transition.pendingLayoutInterruptions.isEmpty
+            || transition.isCompletingLayoutInterruptions
+            || transition.driver != nil
+            || transition.isUserDragLifecycleActive
+            || transition.isAwaitingDidEndDecelerating
+            || transition.isEmittingTerminalDragLifecycleCallback
+            || transition.isDrainingDragDeferredMovements
+            || transition.isDrainingLayoutDeferredMovements
+            || runtime.isDrainingDeferredMovementActions
+            || isInternallyMutating
+            || !transition.movementsDeferredUntilDragEnds.isEmpty
+            || !transition.movementsDeferredUntilLayoutInterruptionEnds.isEmpty
+            || !runtime.deferredMovementActions.isEmpty
+            || nativeState.isDragging
+            || nativeState.isDecelerating
+    }
+
+    /// Marks that the next true transition to idle must be published even when the height is unchanged.
+    func markMovementActivityBegan() {
+        runtime.transition.hasUnpublishedMovementActivity = true
+    }
+
+    /// Coalesces transaction and UIKit terminal callbacks, then publishes only after all owners stop.
+    func scheduleMovementIdlePublicationIfNeeded() {
+        let transition = runtime.transition
+        guard transition.hasUnpublishedMovementActivity,
+              !transition.isIdlePublicationScheduled else { return }
+        transition.isIdlePublicationScheduled = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.runtime.transition.isIdlePublicationScheduled = false
+            self.publishMovementIdleIfPossible()
+        }
+    }
+
+    private func publishMovementIdleIfPossible() {
+        let transition = runtime.transition
+        guard transition.hasUnpublishedMovementActivity,
+              !hasActiveMovementOwner else { return }
+
+        // Clear before entering client code so a re-entrant movement owns a fresh idle event.
+        transition.hasUnpublishedMovementActivity = false
+        eventDelegate?.dragScrollView(
+            self,
+            didBecomeIdleAtDisplayHeight: displayHeight
+        )
+    }
 }
 
 // MARK: - Programmatic movement
 
 @MainActor
 extension BODragScrollView {
-    /// Move the panel to a display height. Every accepted request owns one completion-once transaction.
+    /// Scroll the panel to a display height. Every accepted request owns one completion-once transaction.
     /// The return value is the synchronously resolved height when execution starts immediately. If
     /// UIKit is inside an atomic layout/drag mutation, it is the accepted requested height; use the
     /// completion result for the eventual resolved/final height.
     @discardableResult
-    public func move(
+    public func scroll(
         toDisplayHeight requestedDisplayHeight: CGFloat,
         animated: Bool,
         options: BODragScrollMovementOptions = .init(),
         completion: ((BODragScrollMovementResult) -> Void)? = nil
     ) -> CGFloat {
-        move(
+        return requestMovement(
             toDisplayHeight: requestedDisplayHeight,
             animated: animated,
             options: options,
@@ -163,7 +232,7 @@ extension BODragScrollView {
 
     /// Internal entry used by accessibility and other typed movement sources.
     @discardableResult
-    func move(
+    func requestMovement(
         toDisplayHeight requestedDisplayHeight: CGFloat,
         animated: Bool,
         options: BODragScrollMovementOptions = .init(),
@@ -173,7 +242,7 @@ extension BODragScrollView {
         if !runtime.transition.pendingLayoutInterruptions.isEmpty
             || runtime.transition.isCompletingLayoutInterruptions {
             runtime.transition.movementsDeferredUntilLayoutInterruptionEnds.append { [weak self] in
-                _ = self?.move(
+                _ = self?.requestMovement(
                     toDisplayHeight: requestedDisplayHeight,
                     animated: animated,
                     options: options,
@@ -185,7 +254,7 @@ extension BODragScrollView {
         }
         if runtime.transition.isUserDragLifecycleActive {
             runtime.transition.movementsDeferredUntilDragEnds.append { [weak self] in
-                _ = self?.move(
+                _ = self?.requestMovement(
                     toDisplayHeight: requestedDisplayHeight,
                     animated: animated,
                     options: options,
@@ -197,7 +266,7 @@ extension BODragScrollView {
         }
         if isInternallyMutating {
             runtime.deferredMovementActions.append { [weak self] in
-                _ = self?.move(
+                _ = self?.requestMovement(
                     toDisplayHeight: requestedDisplayHeight,
                     animated: animated,
                     options: options,
@@ -443,6 +512,49 @@ extension BODragScrollView {
         return executeMovement(transaction: transaction, animated: animated, options: options)
     }
 
+    /// OC `onTapGes:` calls `takeAttach:` only when the zero-velocity target differs from the
+    /// current outer offset by at least its value-equality tolerance. Its target solver also keeps
+    /// `shouldMisAttach` / non-snapping ranges authoritative. Keep both decisions outside movement
+    /// transactions, then issue the already-resolved height just like OC `scrollToDisplayH:`.
+    func settleInterruptedSystemAnimationToNearestDetentIfNeeded() {
+        guard !runtimeDetentHeights.isEmpty,
+              runtime.panel.hasCompletedLayout,
+              runtime.transition.isPanelLayoutReady,
+              let model = releaseTargetModel(),
+              !model.segments.isEmpty else { return }
+
+        let transactionEpoch = runtime.transition.nextTransactionID
+        let activeTransactionAtEntry = runtime.transition.activeTransaction
+        let driverAtEntry = runtime.transition.driver
+        let decisionState = decisionStateToken()
+        let decision = solveTarget(
+            model: model,
+            proposedOuterOffset: contentOffset.y,
+            velocity: 0,
+            forceSnapping: false
+        )
+        guard runtime.transition.nextTransactionID == transactionEpoch,
+              runtime.transition.activeTransaction === activeTransactionAtEntry,
+              runtime.transition.driver == driverAtEntry,
+              decisionStateToken() == decisionState,
+              decision.targetOuterOffset.isFinite,
+              decision.targetDisplayHeight.isFinite,
+              !comparisonPolicy.isValueEqual(
+                  decision.targetOuterOffset,
+                  contentOffset.y
+              ) else { return }
+
+        _ = requestMovement(
+            toDisplayHeight: decision.targetDisplayHeight,
+            animated: true,
+            options: BODragScrollMovementOptions(),
+            // OC `takeAttach:` calls the ordinary `scrollToDisplayH:` path (`outset-ani`), not its
+            // public manual-nearest-detent API. Keep the same movement-style/callback reason here.
+            reason: .programmatic,
+            completion: nil
+        )
+    }
+
     // MARK: Layout deferral and invalidation
 
     /// Called by the layout phase once panel geometry, insets, and content size are valid.
@@ -536,7 +648,11 @@ extension BODragScrollView {
         completePendingLayoutInterruptionIfNeeded()
     }
 
-    func abortUserDragLifecycleForRemoval() {
+    func abortUserDragLifecycleForRemoval(
+        preparedDeferredControlCancellation: (() -> Void)? = nil
+    ) {
+        let deferredControlCancellation = preparedDeferredControlCancellation
+            ?? prepareDeferredControlCancellationForRemoval()
         let wasTrackingLifecycle = runtime.transition.isUserDragLifecycleActive
         let wasAwaitingDeceleration = runtime.transition.isAwaitingDidEndDecelerating
         let wasEmittingTerminalCallback = runtime.transition
@@ -547,11 +663,15 @@ extension BODragScrollView {
         let shouldForwardHostDragEnd = runtime.transition.forwardedDragBeginToEventDelegate
         let captureOwnership = takeCaptureCleanupOwnership()
 
+        // Detach every old lifecycle owner before entering UIControl/delegate callbacks. Keep the
+        // top-level drag gate active until the end so re-entrant scroll(to:) requests queue behind
+        // this teardown instead of mutating half-removed geometry synchronously.
         runtime.transition.isAwaitingDidEndDecelerating = false
         runtime.transition.isEmittingTerminalDragLifecycleCallback = false
         runtime.transition.forwardedDragLifecycleToParticipant = false
         runtime.transition.forwardedParticipant = nil
         runtime.transition.forwardedDragBeginToEventDelegate = false
+        deferredControlCancellation?()
 
         // UIKit is not required to deliver the terminal delegate callbacks after removal. Close the
         // exact lifecycle we forwarded so delegates never remain logically dragging. If removal
@@ -574,7 +694,6 @@ extension BODragScrollView {
             eventDelegate?.dragScrollViewDidEndDecelerating(self)
         }
         finishCapture(ifOwnedBy: captureOwnership)
-        finishDeferredControlInteraction()
         finishUserDragLifecycleAndRunDeferredMovements()
     }
 
@@ -583,7 +702,6 @@ extension BODragScrollView {
             participant.delegate?.scrollViewDidEndDecelerating?(participant)
         }
         eventDelegate?.dragScrollViewDidEndDecelerating(self)
-        finishDeferredControlInteraction()
         finishUserDragLifecycleAndRunDeferredMovements()
     }
 
@@ -709,6 +827,7 @@ private extension BODragScrollView {
         reason: BODragScrollMovementReason,
         completion: ((BODragScrollMovementResult) -> Void)?
     ) -> BODragScrollMovementTransaction {
+        markMovementActivityBegan()
         // Any new intention supersedes a pre-layout immediate height owned by the previous request.
         runtime.panel.pendingInitialDisplayHeight = nil
         let closesNativeDeceleration = reason != .dragRelease
@@ -748,7 +867,6 @@ private extension BODragScrollView {
                 )
             }
             eventDelegate?.dragScrollViewDidEndDecelerating(self)
-            finishDeferredControlInteraction()
             finishUserDragLifecycleAndRunDeferredMovements()
             runtime.transition.isEmittingTerminalDragLifecycleCallback = false
         }
@@ -1336,7 +1454,6 @@ private extension BODragScrollView {
         runtime.transition.systemAnimationSettlementMonitorTransactionID = nil
         runtime.transition.systemAnimationStartOffsetY = nil
         runtime.transition.systemAnimationHasObservedProgress = false
-        runtime.transition.lastSystemAnimationEndTimestamp = 0
         runtime.transition.scrollToTopTargetOffsetY = nil
         runtime.transition.scrollToTopSettlementMonitorTransactionID = nil
         runtime.transition.scrollToTopStartOffsetY = nil
@@ -1356,6 +1473,41 @@ private extension BODragScrollView {
             finalDisplayHeight: finalDisplayHeight,
             reconcilesGeometry: reconcilesGeometry
         )
+    }
+
+    /// Transfers Swift ownership away from an interrupted native drag deceleration without
+    /// touching the scroll view's physical offset.
+    ///
+    /// UIKit invokes `scrollViewWillBeginDragging` when a new finger interrupts deceleration. The
+    /// OC implementation only clears its bookkeeping at that callback node; it never performs a
+    /// same-value `setContentOffset`. Doing so from inside UIKit's pan-begin callback can suppress
+    /// the matching zero-velocity will-end/did-end callbacks and strand the drag lifecycle. Keep
+    /// the transaction/re-entrancy guarantees of `replaceActiveMovement`, but leave UIKit's own
+    /// recognizer state machine authoritative for the new touch.
+    func interruptNativeDragDecelerationForNewTouch(
+        outcome: BODragScrollMovementOutcome,
+        finalDisplayHeight: CGFloat? = nil
+    ) {
+        guard runtime.transition.driver == .dragDeceleration else {
+            interruptRunningMovement(
+                outcome: outcome,
+                finalDisplayHeight: finalDisplayHeight
+            )
+            return
+        }
+
+        let transaction = runtime.transition.activeTransaction
+        withInternalMutation {
+            runtime.transition.activeTransaction = nil
+            runtime.transition.pendingLayoutMovement = nil
+            runtime.panel.pendingInitialDisplayHeight = nil
+            clearTransitionDriverState()
+            transaction?.finish(
+                outcome: outcome,
+                finalDisplayHeight: finalDisplayHeight ?? displayHeightForCurrentGeometry,
+                on: self
+            )
+        }
     }
 
     /// Detach animation ownership without firing completion while bounds and panel geometry belong
@@ -1812,7 +1964,10 @@ private extension BODragScrollView {
         runtime.transition.isUserDragLifecycleActive = false
         guard !runtime.transition.isDrainingDragDeferredMovements else { return }
         runtime.transition.isDrainingDragDeferredMovements = true
-        defer { runtime.transition.isDrainingDragDeferredMovements = false }
+        defer {
+            runtime.transition.isDrainingDragDeferredMovements = false
+            scheduleMovementIdlePublicationIfNeeded()
+        }
         while !runtime.transition.isUserDragLifecycleActive,
               !runtime.transition.movementsDeferredUntilDragEnds.isEmpty {
             let action = runtime.transition.movementsDeferredUntilDragEnds.removeFirst()
@@ -1845,7 +2000,6 @@ private extension BODragScrollView {
         runtime.transition.isEmittingTerminalDragLifecycleCallback = false
         let ownership = takeCaptureCleanupOwnership()
         finishCapture(ifOwnedBy: ownership, disposition: .forced)
-        finishDeferredControlInteraction()
         finishUserDragLifecycleAndRunDeferredMovements()
     }
 
@@ -1889,11 +2043,13 @@ private extension BODragScrollView {
         captureOwnership: BODragScrollCaptureCleanupOwnership?
     ) {
         DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  let transaction = self.runtime.transition.activeTransaction,
+            guard let self else { return }
+            guard let transaction = self.runtime.transition.activeTransaction,
                   transaction.id == transactionID,
                   transaction.reason == .dragRelease,
-                  self.runtime.transition.driver == expectedDriver else { return }
+                  self.runtime.transition.driver == expectedDriver else {
+                return
+            }
 
             let continuingOwnership = self.captureCleanupOwnershipContinuingSameSession(
                 from: captureOwnership
@@ -1965,15 +2121,18 @@ private extension BODragScrollView {
 
     /// UIKit can omit `willEndDragging`, leaving a valid native-deceleration lifecycle without a
     /// movement transaction. If its terminal callback arrives during a tracking-only touch, retain
-    /// that touch's refreshed capture until it either becomes a real drag or lifts. No extra state
-    /// machine is needed: the existing capture generation and user-drag flag identify the owner.
+    /// that touch's refreshed capture until it either becomes a real drag or lifts. Capture still
+    /// uses its existing generation/user-drag ownership. UIControl disposition is deliberately not
+    /// coupled to this cleanup task; only the bound physical UITouch observer owns that decision.
     func scheduleCaptureReleaseAfterTrackingOnlyTouch(
         captureOwnership: BODragScrollCaptureCleanupOwnership?
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { [weak self] in
-            guard let self,
-                  self.runtime.transition.activeTransaction == nil,
-                  self.runtime.transition.driver == nil else { return }
+            guard let self else { return }
+            guard self.runtime.transition.activeTransaction == nil,
+                  self.runtime.transition.driver == nil else {
+                return
+            }
             let continuingOwnership = self.captureCleanupOwnershipContinuingSameSession(
                 from: captureOwnership
             )
@@ -1981,6 +2140,7 @@ private extension BODragScrollView {
                 // Drop only the stale token. A different session, or a same-session generation
                 // installed re-entrantly by a terminal callback, remains independently captured.
                 _ = self.takeCaptureCleanupOwnership(ifUnchanged: captureOwnership)
+                self.scheduleMovementIdlePublicationIfNeeded()
                 return
             }
             let currentCaptureOwnership = continuingOwnership.ownership
@@ -2002,7 +2162,7 @@ private extension BODragScrollView {
             let disposition: BODragScrollCaptureTeardownDisposition =
                 self.hostOverscrollState() == nil ? .settled : .forced
             self.finishCapture(ifOwnedBy: ownership, disposition: disposition)
-            self.finishDeferredControlInteraction()
+            self.scheduleMovementIdlePublicationIfNeeded()
         }
     }
 
@@ -2013,11 +2173,15 @@ private extension BODragScrollView {
 @MainActor
 extension BODragScrollView: UIScrollViewDelegate {
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        // The new touch owns the synchronous callback window, including any synthetic completion
-        // of the previous deceleration. Callback-originated movements therefore wait until this
-        // tracking lifecycle ends instead of tearing down the capture needed by the new drag.
+        markMovementActivityBegan()
+        // The new touch owns the synchronous callback window. Callback-originated movements wait
+        // until this tracking lifecycle ends instead of tearing down the capture needed by the new
+        // drag. The previous native deceleration debt deliberately remains open until UIKit ends it.
         runtime.transition.isUserDragLifecycleActive = true
         runtime.transition.forwardedDragBeginToEventDelegate = false
+        // OC clears the touch-completion candidate at the start of will-begin-dragging, before any
+        // participant/control/event callback can re-enter the host. The real drag now owns landing.
+        cancelPendingTouchCompletionSettlement()
         let windowAtEntry = window
         let panelAtEntry = panelView
         let panelGenerationAtEntry = runtime.panel.replacementGeneration
@@ -2037,38 +2201,31 @@ extension BODragScrollView: UIScrollViewDelegate {
                 && !runtime.capture.isSuspendedForWindowTransition
                 && captureIsStillValid
         }
-        if runtime.transition.isAwaitingDidEndDecelerating {
-            // A new touch can cancel native deceleration before UIKit delivers its terminal
-            // callback. Pair the previously forwarded lifecycle now, then transfer capture
-            // ownership to the new drag below.
-            let previousParticipant = runtime.transition.forwardedDragLifecycleToParticipant
-                ? runtime.transition.forwardedParticipant
-                : nil
-            runtime.transition.isAwaitingDidEndDecelerating = false
-            runtime.transition.forwardedDragLifecycleToParticipant = false
-            runtime.transition.forwardedParticipant = nil
-            runtime.transition.isEmittingTerminalDragLifecycleCallback = true
-            if let previousParticipant {
-                previousParticipant.delegate?.scrollViewDidEndDecelerating?(previousParticipant)
-            }
-            eventDelegate?.dragScrollViewDidEndDecelerating(self)
-            finishDeferredControlInteraction()
-            runtime.transition.isEmittingTerminalDragLifecycleCallback = false
-
-            // A terminal callback may remove the host or replace the panel that received this
-            // touch. In either case this begin belongs to invalidated geometry and must not be
-            // resurrected against the new hierarchy. Later callbacks from this cancelled UIKit
-            // drag are ignored by the lifecycle guards below.
-            guard dragEntryIsStillValid() else {
-                finishInvalidatedDragBegin()
-                return
-            }
+        // This emits `.touchCancel`, so establish and validate the drag-entry snapshot around that
+        // external target-action boundary just like every other callback below.
+        cancelDeferredControlIfOnlyLiveTouchBecameDrag()
+        // UIScrollView does not expose which finger crossed its drag threshold. With one observed
+        // touch the UIControl owner is unambiguous and was cancelled above. With multiple touches,
+        // the observer uses per-touch movement to keep an unrelated stationary control intact.
+        guard dragEntryIsStillValid() else {
+            finishInvalidatedDragBegin()
+            return
         }
-        cancelPendingTouchCompletionSettlement()
-        interruptRunningMovement(outcome: .interrupted)
+        // Match OC's continuous native lifecycle exactly. A touch that interrupts deceleration
+        // starts another will-begin/will-end/did-end sequence, while the original deceleration debt
+        // remains open until UIKit's single real did-end-decelerating callback. Do not synthesize
+        // that terminal callback here; the new release below inherits the native lifecycle.
+        if runtime.transition.driver == .dragDeceleration {
+            // Match OC at this exact callback node: release the old drag-deceleration owner, but
+            // do not write contentOffset while UIKit is beginning the replacement pan. UIKit will
+            // deliver will-end/did-end for this touch and the ordinary release solver owns landing.
+            interruptNativeDragDecelerationForNewTouch(outcome: .interrupted)
+        } else {
+            interruptRunningMovement(outcome: .interrupted)
+        }
         // Completing the interrupted movement is an external callback boundary. It may remove the
-        // host or replace the panel just like the synthetic deceleration callback above; never arm
-        // the invalid touch against that new hierarchy or forward a mismatched begin lifecycle.
+        // host or replace the panel; never arm the invalid touch against that new hierarchy or
+        // forward a mismatched begin lifecycle.
         guard dragEntryIsStillValid() else {
             finishInvalidatedDragBegin()
             return
@@ -2272,7 +2429,15 @@ extension BODragScrollView: UIScrollViewDelegate {
         _ scrollView: UIScrollView,
         willDecelerate decelerate: Bool
     ) {
-        guard runtime.transition.isUserDragLifecycleActive else { return }
+        guard runtime.transition.isUserDragLifecycleActive else {
+            // A touch that only stopped participant inertia never crossed the drag threshold.
+            // Its physical touch observer exclusively owns UIControl completion; this lifecycle
+            // callback must not race a later system cancellation into a false touchUpInside.
+            scheduleMovementIdlePublicationIfNeeded()
+            return
+        }
+        // The owner UITouch's movement observer has already cancelled a real control drag. Do not
+        // cancel here: this delegate callback may belong to an unrelated second finger.
         // Deferral protects only the synchronous tracking lifecycle. Once did-end returns, a
         // programmatic movement is authoritative and may interrupt native deceleration immediately.
         defer {
@@ -2321,7 +2486,6 @@ extension BODragScrollView: UIScrollViewDelegate {
             self,
             willDecelerate: awaitsNativeDeceleration
         )
-        finishDeferredControlInteraction()
 
         guard runtime.transition.activeTransaction?.id == finishingTransactionID,
               runtime.transition.driver == finishingDriver else {
@@ -2359,7 +2523,10 @@ extension BODragScrollView: UIScrollViewDelegate {
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         let nativeState = nativeScrollState
         guard runtime.transition.isAwaitingDidEndDecelerating,
-              !nativeState.isDecelerating else { return }
+              !nativeState.isDecelerating else {
+            scheduleMovementIdlePublicationIfNeeded()
+            return
+        }
         defer {
             runtime.transition.isEmittingTerminalDragLifecycleCallback = false
             finishUserDragLifecycleAndRunDeferredMovements()
@@ -2383,6 +2550,10 @@ extension BODragScrollView: UIScrollViewDelegate {
 
         guard runtime.transition.activeTransaction?.id == finishingTransactionID,
               runtime.transition.driver == finishingDriver else {
+            // A terminal callback may replace the panel, remove the host, or install a newer
+            // movement/capture. Drop only the snapshotted cleanup token when it is still current;
+            // a re-entrant capture owns a different generation and must survive this old terminal.
+            _ = takeCaptureCleanupOwnership(ifUnchanged: captureOwnership)
             return
         }
         // UIKit may deliver this old deceleration's sole terminal callback while a new finger is
@@ -2435,14 +2606,15 @@ extension BODragScrollView: UIScrollViewDelegate {
         if runtime.transition.driver.isSystemAnimation,
            let transactionID = runtime.transition.activeTransaction?.id,
            runtime.transition.systemAnimationTransactionID == transactionID {
-            // The callback has no animation identifier. Arm touch-completion only when the current
-            // driver and transaction still match; an old callback must not affect an unrelated tap.
-            runtime.transition.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
+            // Transaction-sensitive settlement monitoring remains scoped to the current owner.
             beginMonitoringSystemAnimationSettlement(transactionID: transactionID)
         }
-        // Preserve the system delegate semantics even when this is a stale callback; only the
-        // component's internal ownership-sensitive side effect is gated above.
         eventDelegate?.dragScrollViewDidEndScrollingAnimation(self)
+        scheduleMovementIdlePublicationIfNeeded()
+
+        // Match OC's callback node exactly: every did-end-scrolling-animation callback records its
+        // time after delegate forwarding. `gestureRecognizerShouldBegin` consumes it once.
+        runtime.transition.lastSystemAnimationEndTimestamp = Date().timeIntervalSince1970
     }
 
     // MARK: Scroll-to-top
@@ -2549,6 +2721,7 @@ extension BODragScrollView: UIScrollViewDelegate {
         // scroll-to-top request. Settlement monitoring already started with the transaction and
         // uses only its observed target/progress, so a stale callback has no internal side effect.
         eventDelegate?.dragScrollViewDidScrollToTop(self)
+        scheduleMovementIdlePublicationIfNeeded()
     }
 }
 

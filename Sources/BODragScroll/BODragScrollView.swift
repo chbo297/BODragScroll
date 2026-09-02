@@ -132,6 +132,11 @@ public final class BODragScrollView: UIScrollView {
     /// The panel's displayed height: `bounds.height - (panel.frame.minY - contentOffset.y)`.
     public private(set) var displayHeight: CGFloat = 0
 
+    /// Whether a movement batch has started and has not yet published its final idle event.
+    public var isMovementActive: Bool {
+        runtime.transition.hasUnpublishedMovementActivity || hasActiveMovementOwner
+    }
+
     /// Whether a UIView-driven display-height transition is active. Event delegates can use this
     /// to distinguish animation-driven height publication from direct drag/scroll publication.
     public var isAnimatingDisplayHeight: Bool {
@@ -350,13 +355,17 @@ public final class BODragScrollView: UIScrollView {
         if newWindow == nil {
             // Set the persistent suspension before UIKit invokes any subclass/view callbacks.
             runtime.capture.isSuspendedForWindowTransition = true
+            let deferredControlCancellation = prepareDeferredControlCancellationForRemoval()
             super.willMove(toWindow: nil)
             endCapture()
             interruptMovementForRemovalFromWindow()
-            abortUserDragLifecycleForRemoval()
+            abortUserDragLifecycleForRemoval(
+                preparedDeferredControlCancellation: deferredControlCancellation
+            )
         } else {
             super.willMove(toWindow: newWindow)
             runtime.capture.isSuspendedForWindowTransition = false
+            resumeControlTouchObservationAfterWindowAttachment()
         }
     }
 

@@ -58,21 +58,30 @@ final class ViewportLayoutParityUITests: DemoUITestCase {
             XCTAssertTrue(
                 waitUntil(timeout: 3) { [weak self] in
                     self?.traceLines(after: baseline).contains {
-                        $0.contains(" viewportInvalidation h=") && $0.contains(" anim=true ")
+                        $0.contains(" sceneEvent h=")
+                            && $0.contains(" anim=true ")
+                            && $0.contains("UI 测试：动画中请求横屏")
                     } == true
                 },
-                "Viewport reconciliation did not observe the active View animation"
+                "The rotation request was not issued while the View animation was active"
             )
-            let activePresentationHeights = traceLines(after: baseline).compactMap { line -> CGFloat? in
-                guard line.contains(" viewportInvalidation h="),
-                      line.contains(" anim=true ") else { return nil }
+            XCTAssertTrue(
+                waitUntil(timeout: 3) { [weak self] in
+                    self?.traceLines(after: baseline).contains {
+                        $0.contains(" viewportInvalidation h=")
+                    } == true
+                },
+                "Viewport reconciliation was not observed after the rotation request"
+            )
+            let reconciledPresentationHeights = traceLines(after: baseline).compactMap { line -> CGFloat? in
+                guard line.contains(" viewportInvalidation h=") else { return nil }
                 return traceDetailValue(named: "visiblePanelHeight", in: line)
             }
             XCTAssertTrue(
-                activePresentationHeights.contains {
+                reconciledPresentationHeights.contains {
                     $0 > 392 && $0 < portraitCeiling - 2
                 },
-                "Relayout did not sample a presentation frame between the middle and top detents: \(activePresentationHeights)"
+                "Relayout did not sample a presentation frame between the middle and top detents: \(reconciledPresentationHeights)"
             )
             XCTAssertTrue(
                 waitUntil(timeout: 8) { [weak self] in
@@ -207,9 +216,17 @@ final class ViewportLayoutParityUITests: DemoUITestCase {
         assertHeightInsideViewport(landscapeMaximum)
 
         // Pull upward once more at the ceiling. Bounce may temporarily overshoot, but settling must
-        // return to the Demo-authored full-viewport detent.
-        dragVisiblePanelContent(deltaY: -90, visibleOffsetFromPanelTop: 180, velocity: .slow)
+        // return to the Demo-authored full-viewport maximum, with or without detents.
+        let bounceBaseline = latestTraceSequence
+        dragVisiblePanelContent(deltaY: -90, visibleOffsetFromPanelTop: 120, velocity: .slow)
         assertHeightInsideViewport(waitForStableDisplayHeight())
+        XCTAssertFalse(
+            traceLines(after: bounceBaseline).contains {
+                $0.contains(" willMoveToDisplayHeight h=")
+                    && $0.contains("reason=programmatic")
+            },
+            "A natural ceiling bounce must not trigger a Demo-authored programmatic movement"
+        )
 
         XCUIDevice.shared.orientation = .portrait
         XCTAssertTrue(
@@ -271,14 +288,22 @@ final class ViewportLayoutParityUITests: DemoUITestCase {
         for _ in 0..<4 {
             let ceiling = viewportHeight()
             if abs(height - ceiling) <= 1 { break }
-            height = dragPanel(deltaY: -app.frame.height * 0.72, velocity: .slow)
+            // Near full height the grabber's 22pt test coordinate can enter the status-bar
+            // exclusion region. Start lower in the panel's noninteractive header so reaching the
+            // natural scroll boundary never depends on a Demo-authored height correction.
+            dragVisiblePanelContent(
+                deltaY: -app.frame.height * 0.72,
+                visibleOffsetFromPanelTop: 120,
+                velocity: .slow
+            )
+            height = waitForStableDisplayHeight()
         }
         let ceiling = viewportHeight()
         XCTAssertEqual(
             height,
             ceiling,
             accuracy: 1,
-            "Highest detent must equal the complete drag-host viewport"
+            "Panel maximum must equal the complete drag-host viewport"
         )
         return height
     }

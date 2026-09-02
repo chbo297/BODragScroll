@@ -14,15 +14,23 @@ Swift Package Manager：
 ```swift
 .package(
     url: "https://github.com/chbo297/BODragScroll.git",
-    from: "1.0.1"
+    from: "2.0.0"
 )
 ```
 
 CocoaPods：
 
 ```ruby
-pod "BODragScroll", "~> 1.0"
+pod "BODragScroll", "~> 2.0"
 ```
+
+### 从 1.x 升级
+
+2.0 将程序化面板移动 API 从 `move(toDisplayHeight:animated:options:completion:)`
+重命名为 `scroll(toDisplayHeight:animated:options:completion:)`。旧名称不再保留，升级时需要同步更新调用点。
+
+2.0 还新增 `isMovementActive` 与
+`dragScrollView(_:didBecomeIdleAtDisplayHeight:)`，用于观察拖拽、减速、动画、回弹和延迟移动形成的整批运动何时完全结束。
 
 ## 推荐接入：三态面板与默认内部联动
 
@@ -145,7 +153,7 @@ final class DemoViewController: UIViewController,
 
 示例把 host 全高作为业务的最大面板高度；也可以按自己的容器布局返回其他尺寸。组件只协调面板和内部滚动，不替业务决定面板的视觉上限。
 
-不要在 sizing 回调中调用 `move(...)`。后续布局通常应保留传入的 `proposedDisplayHeight`，只在业务尺寸范围发生变化时做必要约束。
+不要在 sizing 回调中调用 `scroll(...)`。后续布局通常应保留传入的 `proposedDisplayHeight`，只在业务尺寸范围发生变化时做必要约束。
 
 ### 默认交接配置
 
@@ -168,7 +176,7 @@ dragScrollView.configuration = configuration
 ### 程序化展开、收起和吸附
 
 ```swift
-dragScrollView.move(
+dragScrollView.scroll(
     toDisplayHeight: dragScrollView.detentHeights.last ?? 0,
     animated: true
 ) { result in
@@ -193,6 +201,13 @@ extension DemoViewController: BODragScrollEventDelegate {
 
     func dragScrollView(
         _ dragScrollView: BODragScrollView,
+        didBecomeIdleAtDisplayHeight displayHeight: CGFloat
+    ) {
+        print("all movement is idle at:", displayHeight)
+    }
+
+    func dragScrollView(
+        _ dragScrollView: BODragScrollView,
         didScroll update: BODragScrollUpdate
     ) {
         switch update.source {
@@ -208,7 +223,7 @@ extension DemoViewController: BODragScrollEventDelegate {
 dragScrollView.eventDelegate = self
 ```
 
-`didChangeDisplayHeight` 是高度值变化通知；`didScroll` 是滚动事件通知，即使某次滚动没有改变面板高度也会如实回调。
+`didChangeDisplayHeight` 是高度值变化通知；`didScroll` 是滚动事件通知，即使某次滚动没有改变面板高度也会如实回调。`didBecomeIdleAtDisplayHeight` 在最新一批拖拽、减速、动画、bounce 回位和延迟移动全部停止后只回调一次，适合提交最终业务状态；即使最终高度与上次相同也会回调。
 
 ### 无吸附点的自由面板
 
@@ -303,7 +318,7 @@ Web 内容中存在多层纵向 ScrollView，且希望放弃组件联动、交�
 | `attachDisplayHAr` | `detentHeights` |
 | `misAttachRanges` | `nonSnappingRanges` |
 | `minDisplayH` | `minimumDisplayHeight` |
-| `scrollToDisplayH` | `move(toDisplayHeight:animated:options:completion:)` |
+| `scrollToDisplayH` | `scroll(toDisplayHeight:animated:options:completion:)` |
 | `forceReloadCurrInnerScrollView` | `reloadScrollMetrics()` |
 | `dragScrollDelegate` | `behaviorProvider` + `eventDelegate` |
 

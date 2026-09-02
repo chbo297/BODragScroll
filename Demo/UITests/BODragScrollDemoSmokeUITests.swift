@@ -28,9 +28,18 @@ final class BODragScrollDemoSmokeUITests: DemoUITestCase {
     func testControlsAndGesturesSwiftSmoke() { runSmoke(.controlsAndGestures, .swift) }
     func testControlsAndGesturesObjectiveCSmoke() { runSmoke(.controlsAndGestures, .objectiveC) }
 
+    func testDecelerationControlLabSwiftSmoke() {
+        runSmoke(.decelerationControlLab, .swift, fullHeightDownOffset: 90)
+    }
+
+    func testDecelerationControlLabObjectiveCSmoke() {
+        runSmoke(.decelerationControlLab, .objectiveC, fullHeightDownOffset: 90)
+    }
+
     private func runSmoke(
         _ scenario: DemoScenarioUnderTest,
         _ implementation: DemoImplementationUnderTest,
+        fullHeightDownOffset: CGFloat? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
@@ -43,11 +52,46 @@ final class BODragScrollDemoSmokeUITests: DemoUITestCase {
         assertDragHostFillsScreen(file: file, line: line)
 
         let dragDistance = min(320, app.frame.height * 0.38)
-        let up = dragPanel(deltaY: -dragDistance, file: file, line: line)
+        let up: CGFloat
+        let down: CGFloat
+        if let fullHeightDownOffset, initial >= app.frame.height - 2 {
+            // A full-height panel has no visible grabber coordinate outside the status bar. Start
+            // in the deliberately empty panel header, collapse first, then expand normally.
+            dragVisiblePanelContent(
+                deltaY: dragDistance,
+                visibleOffsetFromPanelTop: fullHeightDownOffset,
+                velocity: .slow
+            )
+            down = waitForStableDisplayHeight(file: file, line: line)
+            up = dragPanel(deltaY: -dragDistance, file: file, line: line)
+        } else {
+            up = dragPanel(deltaY: -dragDistance, file: file, line: line)
+            if let fullHeightDownOffset, up >= app.frame.height - 2 {
+                // At full height the generic grabber coordinate is under the status-bar exclusion
+                // region. Start lower in the still-empty panel header.
+                dragVisiblePanelContent(
+                    deltaY: dragDistance,
+                    visibleOffsetFromPanelTop: fullHeightDownOffset,
+                    velocity: .slow
+                )
+                down = waitForStableDisplayHeight(file: file, line: line)
+            } else {
+                down = dragPanel(deltaY: dragDistance, file: file, line: line)
+            }
+        }
         let traceAfterUp = readHUDSnapshot()
+        if initial < app.frame.height - 2 {
+            XCTAssertGreaterThan(
+                up,
+                initial + 8,
+                "Upward header drag did not expand \(scenario.name)/\(implementation.rawValue). Trace: \(traceAfterUp.rawText)",
+                file: file,
+                line: line
+            )
+        }
         XCTAssertGreaterThan(
             up,
-            initial + 8,
+            down + 8,
             "Upward header drag did not expand \(scenario.name)/\(implementation.rawValue). Trace: \(traceAfterUp.rawText)",
             file: file,
             line: line
@@ -59,7 +103,6 @@ final class BODragScrollDemoSmokeUITests: DemoUITestCase {
             line: line
         )
 
-        let down = dragPanel(deltaY: dragDistance, file: file, line: line)
         XCTAssertLessThan(
             down,
             up - 8,

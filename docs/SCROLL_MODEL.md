@@ -548,7 +548,7 @@ offset，均使用精确 `==` / `!=`。外部哪怕只改动极小量也必须�
 - 模型构建整体失败：本次 capture 关闭组合模型，恢复 panel-only 几何；DEBUG 诊断只报告结果，不参与决策。
 - `innerFirst`，或 `innerFirstAtBoundary` 且内部仍能消耗手势：保留捕获身份但停用组合模型，由原生内部滚动负责。
 - 没有捕获会话但有 detent：释放时构建仅含 panel anchors 的临时模型，吸附行为不依赖是否碰巧捕获到内部 scroll view。
-- 程序化 `move(toDisplayHeight:)` 是 panel-only 绝对移动：先结束 capture，再按面板轴限制目标；它不会把参与者距离混入请求高度。
+- 程序化 `scroll(toDisplayHeight:)` 是 panel-only 绝对移动：先结束 capture，再按面板轴限制目标；它不会把参与者距离混入请求高度。
 - 动画执行时只把规范后的真实 target 交给 UIKit。动画结束不另行强制改写 offset/frame，
   也不使用 CADisplayLink 维护第二份展示高度；终态来自 UIKit 的实际 offset 和真实几何读回。
 
