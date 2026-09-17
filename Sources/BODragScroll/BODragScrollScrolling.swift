@@ -46,6 +46,13 @@ extension BODragScrollView {
             return
         }
 
+        // 宿主可能在上一帧的 didChangeDisplayHeight 里改了 participant 的 frame 高度。
+        // bounds 不是可靠的 KVO 源，这里按帧比对冻结快照：生命周期内只标脏（写回时夹住过期目标），
+        // 生命周期外才真正重载度量。
+        if reconcileParticipantViewportChangeIfNeeded() {
+            return
+        }
+
         let nativeStateAtStart = nativeScrollState
         rebaseAdaptiveAxisForReturningDragIfNeeded(
             nativeIsDragging: nativeStateAtStart.isDragging
@@ -488,8 +495,20 @@ extension BODragScrollView {
               runtime.scrolling.callbackEpoch == scrollingCallbackEpoch,
               panelView === panelAtStart,
               captureSessionIsCurrentAndHierarchyValid(session) else { return }
+        guard let participant = session.participant(with: participantID) else { return }
         var restoredOffset = scrollView.contentOffset
-        restoredOffset.y = participantProjection.contentOffset
+        restoredOffset.y = pinnedParticipantOffset(
+            participantProjection.contentOffset,
+            of: participant
+        )
+        // 临时排查用日志（不要提交）：这里是「metrics 变了但模型不重建」时的强行回写点。
+        bodragJitterLog(
+            "restoreProjectionAfterDeferredMetrics",
+            "from=\(BODragScrollJitterLog.number(scrollView.contentOffset.y))"
+                + " to=\(BODragScrollJitterLog.number(restoredOffset.y))"
+                + " hostOff=\(BODragScrollJitterLog.number(contentOffset.y))"
+                + " inner=[\(BODragScrollJitterLog.describe(scrollView))]"
+        )
         // This setter can call client code; deliberately perform no host/session writes afterward.
         scrollView.setContentOffsetIfNeeded(restoredOffset)
     }

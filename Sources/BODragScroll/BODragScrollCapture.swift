@@ -73,6 +73,10 @@ final class BODragScrollParticipant {
     weak var scrollView: UIScrollView?
     var observations: [NSKeyValueObservation] = []
     var lastContentSize: CGSize
+    /// Viewport height frozen into the most recent model build. UIKit does not report a
+    /// KVO-reliable `bounds` change, so the scroll path compares against this value to notice a
+    /// host-driven viewport resize inside one physical lifecycle.
+    var capturedViewportHeight: CGFloat?
 
     init(id: ParticipantID, scrollView: UIScrollView) {
         self.id = id
@@ -144,7 +148,11 @@ final class BODragScrollCaptureState {
 extension BODragScrollView {
     /// Re-snapshot the current participants and rebuild the composite scroll model.
     public func reloadScrollMetrics() {
-        guard !deferCaptureMetricsReloadIfPhysicalLifecycleIsActive() else { return }
+        // 临时排查用日志（不要提交）：dropped=true 说明宿主这次 reload 被丢掉了，
+        // 模型继续用按下瞬间的 viewportHeight/contentHeight 快照。
+        let dropped = deferCaptureMetricsReloadIfPhysicalLifecycleIsActive()
+        bodragJitterLog("reloadScrollMetrics", "dropped=\(dropped)")
+        guard !dropped else { return }
         reloadCaptureMetrics(reason: .explicitReload)
     }
 
@@ -173,6 +181,81 @@ extension BODragScrollView {
         guard captureModelIsOwnedByPhysicalLifecycle else { return false }
         session.hasDeferredMetricsChange = true
         return true
+    }
+
+    /// Notices a host-driven viewport resize of a participant.
+    ///
+    /// `bounds` is not dependably KVO-observable on UIView, so the scroll path polls the frozen
+    /// snapshot instead. While a physical lifecycle owns the model the axis deliberately stays
+    /// frozen: detent settling, endpoint authority, bounce ownership and mismatch recovery are all
+    /// derived from that one snapshot, so rebuilding it per frame would invalidate them. The stale
+    /// ranges are neutralized at write time instead — see `pinnedParticipantOffset(_:of:)`.
+    ///
+    /// Returns true when the axis was reloaded and the caller should abandon the current sample.
+    @discardableResult
+    func reconcileParticipantViewportChangeIfNeeded() -> Bool {
+        guard let session = runtime.capture.session,
+              session.model != nil,
+              let resizedViewportHeight = resizedParticipantViewportHeight(in: session) else {
+            return false
+        }
+
+        bodragJitterLog(
+            "participantViewportDidChange",
+            "live=\(BODragScrollJitterLog.number(resizedViewportHeight))"
+                + " ownedByLifecycle=\(captureModelIsOwnedByPhysicalLifecycle)"
+        )
+        guard !captureModelIsOwnedByPhysicalLifecycle else {
+            // Same contract as an observed contentSize/inset change: mark the metrics dirty so
+            // teardown reconciles against the new standalone range, and let the next touch build a
+            // fresh session.
+            session.hasDeferredMetricsChange = true
+            return false
+        }
+        reloadCaptureMetrics(reason: .observedMetrics)
+        return true
+    }
+
+    /// The first participant whose live viewport no longer matches the frozen model snapshot.
+    private func resizedParticipantViewportHeight(
+        in session: BODragScrollCaptureSession
+    ) -> CGFloat? {
+        for participant in session.participantChain {
+            guard let scrollView = participant.scrollView,
+                  let capturedViewportHeight = participant.capturedViewportHeight else { continue }
+            let live = scrollView.bounds.height
+            guard live.isFinite, abs(live - capturedViewportHeight) > 0.5 else { continue }
+            return live
+        }
+        return nil
+    }
+
+    /// Pins a projected participant target to what that participant can physically reach while its
+    /// viewport disagrees with the snapshot the frozen ranges were derived from.
+    ///
+    /// This is not a bounce guard: it only engages for a participant the host resized under an
+    /// active lifecycle, where a projection past the live range is an expired target rather than a
+    /// real overscroll. Teardown still reconciles the axis through `hasDeferredMetricsChange`.
+    func pinnedParticipantOffset(
+        _ target: CGFloat,
+        of participant: BODragScrollParticipant
+    ) -> CGFloat {
+        guard let scrollView = participant.scrollView,
+              let capturedViewportHeight = participant.capturedViewportHeight,
+              abs(scrollView.bounds.height - capturedViewportHeight) > 0.5 else { return target }
+        let range = scrollableRange(of: scrollView)
+        guard range.minimum.isFinite, range.maximum.isFinite else { return target }
+        let pinned = min(range.maximum, max(range.minimum, target))
+        guard abs(pinned - target) > 0.5 else { return target }
+
+        bodragJitterLog(
+            "pinStaleParticipantTarget",
+            "target=\(BODragScrollJitterLog.number(target))"
+                + " pinned=\(BODragScrollJitterLog.number(pinned))"
+                + " capturedViewport=\(BODragScrollJitterLog.number(capturedViewportHeight))"
+                + " liveViewport=\(BODragScrollJitterLog.number(scrollView.bounds.height))"
+        )
+        return pinned
     }
 
     private var captureModelIsOwnedByPhysicalLifecycle: Bool {
@@ -896,7 +979,16 @@ extension BODragScrollView {
             return
         }
         participant.lastContentSize = scrollView.contentSize
-        if deferCaptureMetricsReloadIfPhysicalLifecycleIsActive() {
+        // 临时排查用日志（不要提交）：拖动中收到 metrics 变化只能走 deferred restore，
+        // 模型里的 viewportHeight/contentHeight 仍是按下瞬间的快照。
+        let willDefer = deferCaptureMetricsReloadIfPhysicalLifecycleIsActive()
+        bodragJitterLog(
+            "participantMetricsDidChange",
+            "kind=\(contentSizeChange ? "contentSize" : "inset")"
+                + " deferred=\(willDefer)"
+                + " inner=[\(BODragScrollJitterLog.describe(scrollView))]"
+        )
+        if willDefer {
             // One physical lifecycle owns one immutable participant-metrics snapshot. Rebuilding
             // it from a projected bounce offset would reinterpret temporary geometry as a new
             // mathematical start and can fold the bounce to a boundary. An adaptive phase may
@@ -1601,6 +1693,17 @@ extension BODragScrollView {
                     childFrame: childFrame
                 )
             )
+            participant.capturedViewportHeight = scrollView.bounds.height
+            // 临时排查用日志（不要提交）：这就是一次物理生命周期内被冻结的 participant 快照。
+            bodragJitterLog(
+                "modelSnapshot",
+                "index=\(index)"
+                    + " content=\(BODragScrollJitterLog.number(scrollView.contentSize.height))"
+                    + " viewport=\(BODragScrollJitterLog.number(scrollView.bounds.height))"
+                    + " insetT=\(BODragScrollJitterLog.number(inset.top))"
+                    + " insetB=\(BODragScrollJitterLog.number(inset.bottom))"
+                    + " off=\(BODragScrollJitterLog.number(scrollView.contentOffset.y))"
+            )
         }
         return result
     }
@@ -1756,14 +1859,25 @@ extension BODragScrollView {
                   runtime.capture.operationEpoch == operationEpoch,
                   runtime.scrolling.callbackEpoch == scrollingCallbackEpoch,
                   ensureCaptureSessionIsCurrentAndHierarchyValid(session) else { return }
-            guard let scrollView = session.participant(with: projected.participantID)?.scrollView else { continue }
+            guard let participant = session.participant(with: projected.participantID),
+                  let scrollView = participant.scrollView else { continue }
             if projected.participantID != session.primaryParticipant?.id,
                !scrollView.isScrollEnabled {
                 continue
             }
             var offset = scrollView.contentOffset
-            offset.y = projected.contentOffset
+            offset.y = pinnedParticipantOffset(projected.contentOffset, of: participant)
+            // 临时排查用日志（不要提交）：target 是模型算出的目标，after 是 UIKit 实际落点，
+            // 两者不等说明 UIKit 按当前 bounds/contentSize 又夹了一次 —— 抖动的直接现场。
+            let offsetBefore = scrollView.contentOffset.y
             scrollView.setContentOffsetIfNeeded(offset)
+            bodragJitterLog(
+                "applyParticipantOffset",
+                "target=\(BODragScrollJitterLog.number(projected.contentOffset))"
+                    + " before=\(BODragScrollJitterLog.number(offsetBefore))"
+                    + " after=\(BODragScrollJitterLog.number(scrollView.contentOffset.y))"
+                    + " inner=[\(BODragScrollJitterLog.describe(scrollView))]"
+            )
             guard runtime.capture.session === session,
                   runtime.capture.operationEpoch == operationEpoch,
                   runtime.scrolling.callbackEpoch == scrollingCallbackEpoch,

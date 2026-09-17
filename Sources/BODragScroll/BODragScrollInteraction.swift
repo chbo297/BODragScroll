@@ -895,6 +895,15 @@ extension BODragScrollView: UIGestureRecognizerDelegate {
             gestureRecognizer,
             otherGestureRecognizer: otherGestureRecognizer
         )
+        // 临时排查用日志（不要提交）。
+        if gestureRecognizer.view === self,
+           let primary = primaryParticipantScrollView,
+           otherGestureRecognizer.view === primary {
+            bodragJitterLog(
+                "arbitration.requireFailureOfInner",
+                "result=\(result) mode=\(configuration.handoff.mode) inner=[\(BODragScrollJitterLog.describe(primary))]"
+            )
+        }
 #if DEBUG
         debugGestureArbitration(
             callback: "shouldRequireFailureOf",
@@ -964,6 +973,16 @@ extension BODragScrollView: UIGestureRecognizerDelegate {
             gestureRecognizer,
             otherGestureRecognizer: otherGestureRecognizer
         )
+        // 临时排查用日志（不要提交）。result=true 表示内部 pan 必须等外层 pan 先失败，
+        // 也就是「内部手势被 fail 掉、全部由 dragScroll 驱动」的预期形态。
+        if gestureRecognizer.view === self,
+           let primary = primaryParticipantScrollView,
+           otherGestureRecognizer.view === primary {
+            bodragJitterLog(
+                "arbitration.innerMustWaitForPanel",
+                "result=\(result) mode=\(configuration.handoff.mode) innerPanState=\(primary.panGestureRecognizer.state.rawValue)"
+            )
+        }
 #if DEBUG
         debugGestureArbitration(
             callback: "shouldBeRequiredToFailBy",
@@ -1038,6 +1057,12 @@ extension BODragScrollView: UIGestureRecognizerDelegate {
             gestureRecognizer,
             otherGestureRecognizer: otherGestureRecognizer
         )
+        // 临时排查用日志（不要提交）。simultaneous=true + inner 未被 fail 掉 = 双驱动，会抖。
+        if gestureRecognizer.view === self,
+           let primary = primaryParticipantScrollView,
+           otherGestureRecognizer.view === primary {
+            bodragJitterLog("arbitration.simultaneousWithInner", "result=\(result)")
+        }
 #if DEBUG
         debugGestureArbitration(
             callback: "shouldRecognizeSimultaneouslyWith",
