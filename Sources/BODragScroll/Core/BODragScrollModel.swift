@@ -659,6 +659,60 @@ struct ScrollModel: Equatable {
         )
     }
 
+    /// Returns a model whose participant inner distances follow changed participant metrics.
+    ///
+    /// A narrow transformation in the same spirit as `rebasedAdaptiveParticipantAxis(to:)`: the
+    /// detent table, participant identity and order, each segment's activation display height and
+    /// each segment's `innerStart` are preserved; only the remaining inner distance moves, and
+    /// `ScrollModelBuilder` recomputes the outer ranges so a caller can replace the immutable model
+    /// atomically.
+    ///
+    /// `innerStart` is deliberately untouched. Capture may have anchored a participant at its
+    /// current offset rather than at `-insetTop`, and that decision belongs to the capture, not to a
+    /// metrics change. Fails closed when one participant owns several segments (a nested ancestor
+    /// split around its child): redistributing a resized range across slices is a topology change
+    /// and belongs to a full rebuild.
+    func rebasedParticipantInnerDistances(
+        shiftingInnerEndBy deltas: [ParticipantID: CGFloat]
+    ) -> ScrollModel? {
+        guard !deltas.isEmpty, deltas.values.allSatisfy(\.isFinite) else { return nil }
+
+        var snapshots: [ParticipantSegmentSnapshot] = []
+        snapshots.reserveCapacity(segments.count)
+        var seenParticipants = Set<ParticipantID>()
+        var movedAnySegment = false
+
+        for segment in segments {
+            guard let participantID = segment.participantID else { continue }
+            guard seenParticipants.insert(participantID).inserted else { return nil }
+
+            let innerEnd = max(segment.innerStart, segment.innerEnd + (deltas[participantID] ?? 0))
+            guard innerEnd.isFinite else { return nil }
+            movedAnySegment = movedAnySegment || innerEnd != segment.innerEnd
+            snapshots.append(
+                ParticipantSegmentSnapshot(
+                    participantID: participantID,
+                    displayHeight: .native(segment.displayHeight),
+                    innerStart: .native(segment.innerStart),
+                    innerEnd: .native(innerEnd)
+                )
+            )
+        }
+
+        guard movedAnySegment,
+              seenParticipants == Set(participantOrder) else { return nil }
+
+        return try? ScrollModelBuilder.build(
+            from: ScrollModelSnapshot(
+                viewportHeight: viewportHeight,
+                displayScale: comparison.displayScale,
+                detents: detentDisplayHeights.map(ScrollSourceScalar.native),
+                participantOrder: participantOrder,
+                participantSegments: snapshots
+            )
+        )
+    }
+
     func projection(at outerOffset: CGFloat) -> Projection {
         var offsets: [ParticipantID: CGFloat] = [:]
         var encounterOrder: [ParticipantID] = []

@@ -281,6 +281,8 @@ provider 是任意同步业务代码。返回后引擎会不再询问策略地�
 
 tracking、减速、回弹或其它 active driver 正在使用捕获时 metrics 快照时，KVO 不立即重建：session 只记录一次 deferred-metrics 标记，当前物理生命周期继续使用该快照。若 UIKit 因 `contentSize` 收缩已先行夹回 participant offset，KVO 只用当前已提交轴阶段和未变的 host offset 恢复这个发生变化的 participant，不改写 host 或其它参与者，也不启动新动画。终止清理按变化后的 standalone range 使用 `forced` 语义。旧物理 owner 尚未结束时发生的新 touch-down 仍保留旧轴；只有它实际进入 `willBeginDragging`，才先中断旧 driver，再从当前 metrics 建立 fresh session。仅 tracking 后抬起不会把旧轴替换掉。这样动态列表加载/收缩不会把临时 bounce offset 折叠成新的组合轴起点。
 
+**生命周期内的 metrics 重基（7.2）优先于上面的延迟路径**：宿主在手势中改变 participant 的 viewport（例如面板变高、内部列表跟着变高）时，先尝试只平移该 participant 的剩余 inner 距离；只有重基被拒时才退回「标记 deferred + 写回时夹住过期目标」。
+
 平稳状态下，`reloadScrollMetrics()` 先更新 panel-only outer inset 并保持当前 offset，再重建当前 capture；若外部在当前物理生命周期中调用，它与 metrics KVO 一样只标记 deferred，不改写正在使用的轴。
 
 configuration、detent 和 behavior provider 变化使用独立的 `.configuration` 路径：新的配置对象、provider 和 decision revision 立即生效，但依赖它们的组合轴、inset 和 provider panel sizing 在当前物理 owner 结束前不折入旧模型。provider 变化还会暂缓普通 `layoutSubviews` 对 panel 的重算；capture teardown 后统一安排一次布局。viewport 尺寸或显式 `invalidatePanelLayout()` 属于结构性变化，会通过既有 coherent-layout interruption 立即取得所有权，不受这项延迟限制。配置变化只延迟几何，不需要额外 dirty 状态，也不把正常 settled teardown 升级为 forced。
@@ -336,6 +338,32 @@ participant delegate 或 event delegate，也不更换 capture generation。随�
 
 普通 `didScroll` 只读取最近样本、参与段首尾和当前 delta，门控为 O(1)；只有命中上述语义拐点才按
 participant segments 数量执行 O(n) 的纯模型重建和连续性验证。重基不是逐帧行为。
+
+### 7.2 生命周期内的 participant metrics 重基
+
+宿主可以在一次物理生命周期里改变 participant 的可视高度：例如面板从半屏拖向全屏时，内部列表的
+`frame` 高度跟着展示区一起变。这类变化会把 participant 的合法 inner 范围
+（`contentSize + insetBottom − viewportHeight`）改小或改大，而捕获时冻结的
+`innerEnd` 仍是旧值 —— 引擎按旧范围写回 offset，UIKit 按新范围夹回，逐帧对打就是可见的抖动。
+
+`bounds` 在 UIView 上不是可靠的 KVO 源，因此 `didScroll` 顶部按帧比对 participant 的
+`capturedViewportHeight` / `capturedInnerMaximum`（每个 participant 两次浮点比较），只有真的变了才进入
+重基。重基与 7.1 同源但更窄：
+
+- 只把每个 participant 段的 `innerEnd` 平移合法距离的增量，`innerStart`、激活 display height、
+  参与者身份与顺序、**detent 表**全部保持；`innerStart` 不动是因为捕获可能故意把参与者锚在当前
+  offset 而非 `-insetTop`，那是捕获的决定，不该被一次 metrics 变化改写；
+- 用纯模型 `rebasedParticipantInnerDistances(shiftingInnerEndBy:)` 生成候选，由既有 builder 重算
+  outer 区间，因此不重算档位、不重定 routing provenance、不推进 capture 的重建路径；
+- 校验与 7.1 同构：把 participant 当前 offset 反投到新轴，要求 `panelOriginY`、display height 与每个
+  participant offset 都与当前一致，否则 fail closed；
+- 通过后原子替换轴阶段，**沿用**原 `rebasePolicy` 与 `endpointAuthority`，只写一次 host `contentSize`
+  （必要时补一次等值 offset），因此 detent 吸附、bounce 归属、mismatch 恢复的语义不变；
+- 一个 participant 被拆成多段（嵌套祖先被子视图切开）时属于拓扑变化，直接 fail closed。
+
+fail closed 的帧退回原有语义：session 标记 deferred metrics，写回 participant offset 时把超出**当前**
+合法范围的过期投影夹住（那不是 bounce，是过期目标），由 teardown 的 `forced` 归位收敛。bounce、
+mismatch recovery 在飞行中也走这条退路，避免中途改变 UIKit 正在动画的振幅。
 
 ### 7.2 handoff mode
 
