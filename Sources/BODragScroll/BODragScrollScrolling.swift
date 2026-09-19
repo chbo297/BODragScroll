@@ -501,14 +501,6 @@ extension BODragScrollView {
             participantProjection.contentOffset,
             of: participant
         )
-        // 临时排查用日志（不要提交）：这里是「metrics 变了但模型不重建」时的强行回写点。
-        bodragJitterLog(
-            "restoreProjectionAfterDeferredMetrics",
-            "from=\(BODragScrollJitterLog.number(scrollView.contentOffset.y))"
-                + " to=\(BODragScrollJitterLog.number(restoredOffset.y))"
-                + " hostOff=\(BODragScrollJitterLog.number(contentOffset.y))"
-                + " inner=[\(BODragScrollJitterLog.describe(scrollView))]"
-        )
         // This setter can call client code; deliberately perform no host/session writes afterward.
         scrollView.setContentOffsetIfNeeded(restoredOffset)
     }
@@ -830,7 +822,11 @@ private extension BODragScrollView {
               panelView === panelAtStart,
               ensureCaptureSessionIsCurrentAndHierarchyValid(session) else { return false }
 
-        applyParticipantOffsets(geometry.participantOffsets, session: session)
+        applyParticipantOffsets(
+            geometry.participantOffsets,
+            overscroll: geometry.overscroll,
+            session: session
+        )
         return runtime.capture.session === session
             && runtime.capture.operationEpoch == captureOperationEpoch
             && runtime.scrolling.callbackEpoch == scrollingCallbackEpoch

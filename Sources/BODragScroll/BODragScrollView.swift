@@ -42,6 +42,23 @@ struct BODragScrollOverscrollState: Equatable {
     let owner: SegmentOwner
     let boundaryOffset: CGFloat
     let distance: CGFloat
+
+    /// Whether this overscroll is the bounce of that exact participant.
+    func ownsBounce(of participantID: ParticipantID) -> Bool {
+        guard case .participant(let bounceOwner) = owner else { return false }
+        return bounceOwner == participantID
+    }
+
+    /// The bounce measured in participant coordinates: a top bounce moves the content down.
+    var signedDistance: CGFloat { edge == .top ? -distance : distance }
+}
+
+extension Optional where Wrapped == BODragScrollOverscrollState {
+    func ownsBounce(of participantID: ParticipantID) -> Bool {
+        self?.ownsBounce(of: participantID) ?? false
+    }
+
+    var signedDistance: CGFloat { self?.signedDistance ?? 0 }
 }
 
 @MainActor

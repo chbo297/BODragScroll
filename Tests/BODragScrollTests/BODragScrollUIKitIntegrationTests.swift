@@ -6867,6 +6867,78 @@ final class BODragScrollUIKitIntegrationTests: XCTestCase {
         XCTAssertTrue(dragScrollView.isAwaitingTouchCompletionSettlement)
     }
 
+    /// A participant the host resized mid-lifecycle gets its expired projection pinned into the live
+    /// range, but the pin must not swallow that participant's own bounce: only the boundary base is
+    /// pinned and the signed bounce distance is added back on top.
+    func testInnerOwnedBounceGrowsFromTheLiveBoundaryWhenMetricsAreStale() throws {
+        let (dragScrollView, panelView) = makeHost(detents: [100, 200, 300])
+        let window = attachToWindow(dragScrollView)
+        let participantScrollView = makeScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 300),
+            contentHeight: 900
+        )
+        let leafView = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        participantScrollView.addSubview(leafView)
+        panelView.addSubview(participantScrollView)
+        let provider = SegmentProvider([
+            BODragScrollInnerScrollSegment(
+                displayHeight: 300,
+                beginOffsetY: 0,
+                endOffsetY: 600
+            )
+        ])
+        dragScrollView.behaviorProvider = provider
+        layout(dragScrollView)
+        dragScrollView.beginCapture(from: leafView)
+        defer {
+            dragScrollView.endCapture()
+            window.isHidden = true
+            _ = provider
+        }
+        let session = try XCTUnwrap(dragScrollView.runtime.capture.session)
+        let participant = try XCTUnwrap(session.primaryParticipant)
+
+        // The host grew the list's viewport after the ranges were frozen, so the live maximum
+        // (900 - 400) sits below what the frozen axis still projects.
+        participant.capturedViewportHeight = 300
+        participantScrollView.frame = CGRect(x: 0, y: 0, width: 320, height: 400)
+
+        let projected = ParticipantProjection(participantID: participant.id, contentOffset: 520)
+
+        // Without a bounce the expired target is pinned back to the live boundary…
+        XCTAssertEqual(
+            dragScrollView.pinnedParticipantOffset(520, of: participant),
+            500,
+            accuracy: 0.01
+        )
+
+        // …but the participant's own bounce still grows from that boundary.
+        let innerBounce = BODragScrollOverscrollState(
+            edge: .bottom,
+            owner: .participant(participant.id),
+            boundaryOffset: 500,
+            distance: 30
+        )
+        XCTAssertEqual(
+            dragScrollView.participantOffset(for: projected, of: participant, overscroll: innerBounce),
+            520,
+            accuracy: 0.01
+        )
+
+        // A bounce owned by somebody else is not this participant's excursion, so the pin still bites.
+        let panelBounce = BODragScrollOverscrollState(
+            edge: .bottom,
+            owner: .panel,
+            boundaryOffset: 500,
+            distance: 30
+        )
+        XCTAssertEqual(
+            dragScrollView.participantOffset(for: projected, of: participant, overscroll: panelBounce),
+            500,
+            accuracy: 0.01
+        )
+    }
+
     private func makeHost(
         detents: [CGFloat] = [],
         layout shouldLayout: Bool = true,
