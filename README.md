@@ -14,14 +14,14 @@ Swift Package Manager：
 ```swift
 .package(
     url: "https://github.com/chbo297/BODragScroll.git",
-    from: "2.0.0"
+    from: "2.1.0"
 )
 ```
 
 CocoaPods：
 
 ```ruby
-pod "BODragScroll", "~> 2.0"
+pod "BODragScroll", "~> 2.1"
 ```
 
 ### 从 1.x 升级
