@@ -251,8 +251,11 @@ final class BODragScrollHostLeaseCleanup {
     }
 }
 
-private var bodragScrollHostLinkKey: UInt8 = 0
-private var bodragScrollScrollsToTopLeaseKey: UInt8 = 0
+// Associated-object keys: only the *address* is ever used, the value is never read or written.
+// `nonisolated(unsafe)` is the accurate description of that — there is no shared mutable state here
+// to protect, just a stable address. Matches the same pattern in BOUIKit.
+nonisolated(unsafe) private var bodragScrollHostLinkKey: UInt8 = 0
+nonisolated(unsafe) private var bodragScrollScrollsToTopLeaseKey: UInt8 = 0
 
 private extension UIScrollView {
     var bodragScrollHostLink: BODragScrollWeakHostLink? {
@@ -357,9 +360,15 @@ private let bodragScrollIsDeceleratingCCharGetter: BODragScrollCCharGetter = { o
 /// implementation. Installation is permanent for the life of the process; there is intentionally no
 /// runtime enable switch and no uninstall operation.
 enum BODragScrollUIScrollViewBridge {
-    private static var isDraggingHook: BODragScrollGetterHook?
-    private static var isTrackingHook: BODragScrollGetterHook?
-    private static var isDeceleratingHook: BODragScrollGetterHook?
+    // Written exactly once, from `install(_:boolReplacement:cCharReplacement:)` during the
+    // `installation` initializer, which is main-thread asserted and runs at most once; read-only for
+    // the rest of the process lifetime (see the type comment: installation is permanent, there is no
+    // uninstall). Reads happen from the swizzled getters, which are plain C function pointers and
+    // therefore nonisolated — so `@MainActor` is not an option here, and write-once-then-immutable is
+    // precisely what `nonisolated(unsafe)` is for.
+    nonisolated(unsafe) private static var isDraggingHook: BODragScrollGetterHook?
+    nonisolated(unsafe) private static var isTrackingHook: BODragScrollGetterHook?
+    nonisolated(unsafe) private static var isDeceleratingHook: BODragScrollGetterHook?
 
     private static let installation: Void = {
         precondition(Thread.isMainThread, "BODragScroll state bridging must be installed on the main thread")
