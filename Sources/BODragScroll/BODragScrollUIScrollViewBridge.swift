@@ -23,6 +23,12 @@ private final class BODragScrollWeakViewReference {
 /// Immutable weak identity snapshot of the physical primary-view -> panel path captured for one
 /// session. Exact superview edges are retained, not merely descendant membership, so inserting a
 /// new scroll ancestor or wrapper invalidates the old composite model as well as outright reparenting.
+///
+/// 整个类型标 `@MainActor`：它记的就是 UIView 层级，建快照和每次校验都要走 `superview` 链，
+/// 这些全是主 actor 状态。隔离写在类型上，而不是靠函数体里手写 `Thread.isMainThread` —— 后者
+/// 编译器看不穿，Swift 6 下每个读点都会报隔离告警。两个 nonisolated 入口（被 swizzle 的 getter、
+/// 宿主析构时的 lease 清理）各自用 `MainActor.assumeIsolated` 承接自己的主线程前提。
+@MainActor
 final class BODragScrollCaptureHierarchySnapshot {
     weak var host: BODragScrollView?
     weak var panelView: UIView?
@@ -30,6 +36,8 @@ final class BODragScrollCaptureHierarchySnapshot {
     private let participantReferences: [BODragScrollWeakViewReference]
     private let pathReferences: [BODragScrollWeakViewReference]
 
+    // 建快照要走 `superview` 链，那是主 actor 状态；唯一的建快照入口（capture 安装路径、测试）
+    // 本来就在主 actor 上，隔离由类型上的 `@MainActor` 统一表达。
     init(
         host: BODragScrollView,
         panelView: UIView,
@@ -51,8 +59,11 @@ final class BODragScrollCaptureHierarchySnapshot {
     }
 
     func isValid(expectedPrimary: UIScrollView? = nil) -> Bool {
-        guard Thread.isMainThread,
-              let host,
+        // 原来这里有一道 `Thread.isMainThread` 守卫，作用是「被 swizzle 的 getter 从别的线程调进来
+        // 就别碰 UIKit，直接判无效」。现在隔离由类型上的 `@MainActor` 表达，这个前提由调用方保证：
+        // 那个 nonisolated 入口在 `resolve` 里用 `MainActor.assumeIsolated` 承接，走错线程就地 trap，
+        // 不再是静默 UB。主线程上的行为与之前逐字一致。
+        guard let host,
               let panelView,
               panelView.superview === host else { return false }
 
@@ -84,8 +95,10 @@ final class BODragScrollCaptureHierarchySnapshot {
     /// plus the still-live panel edge lets the cleanup token distinguish an intact old hierarchy
     /// from a participant that has been transferred elsewhere.
     func isValidForDeinitializingHost(_ expectedHostID: ObjectIdentifier) -> Bool {
-        guard Thread.isMainThread,
-              hostID == expectedHostID,
+        // 同 `isValid`：原先那道 `Thread.isMainThread` 守卫改由唯一调用方
+        // `releaseCaptureLeaseForDeinitializingHost` 负责——它在析构点仍然先判线程再
+        // `MainActor.assumeIsolated`，非主线程时根本不会调到这里（老行为：留着孤儿 lease）。
+        guard hostID == expectedHostID,
               let panelView else { return false }
         if let panelSuperview = panelView.superview,
            ObjectIdentifier(panelSuperview) != expectedHostID {
@@ -568,30 +581,39 @@ enum BODragScrollUIScrollViewBridge {
         // from the wrong thread during deinit.
         guard Thread.isMainThread else { return }
 
-        if let link = scrollView.bodragScrollHostLink,
-           link.hostID == hostID,
-           link.captureSessionID == captureSessionID {
-            scrollView.bodragScrollHostLink = nil
-        }
+        // 入口必须保持 nonisolated：它是从 `BODragScrollHostLeaseCleanup.deinit` 调进来的，
+        // 析构点没有 actor 上下文可用。上面那行判断已经确认了「现在在主线程」，
+        // `MainActor.assumeIsolated` 把这个结论交给编译器，运行时行为不变；
+        // 判断走错的情况从原来的静默跨线程读写 UIKit 变成立刻 trap。
+        MainActor.assumeIsolated {
+            if let link = scrollView.bodragScrollHostLink,
+               link.hostID == hostID,
+               link.captureSessionID == captureSessionID {
+                scrollView.bodragScrollHostLink = nil
+            }
 
-        guard let lease = scrollView.bodragScrollScrollsToTopLease,
-              lease.hostID == hostID,
-              lease.captureSessionID == captureSessionID else { return }
+            guard let lease = scrollView.bodragScrollScrollsToTopLease,
+                  lease.hostID == hostID,
+                  lease.captureSessionID == captureSessionID else { return }
 
-        if lease.hierarchy.isValidForDeinitializingHost(hostID),
-           let targetOffset = normalizedOffsetForLeaseCleanup(of: scrollView),
-           !CGPointEqualToPoint(scrollView.contentOffset, targetOffset) {
-            scrollView.setContentOffset(targetOffset, animated: false)
-            // The setter is overridable and may synchronously transfer the participant. Never
-            // clear or restore state belonging to that newer owner.
-            guard scrollView.bodragScrollScrollsToTopLease === lease else { return }
-        }
-        scrollView.bodragScrollScrollsToTopLease = nil
-        if scrollView.scrollsToTop != lease.originalValue {
-            scrollView.scrollsToTop = lease.originalValue
+            if lease.hierarchy.isValidForDeinitializingHost(hostID),
+               let targetOffset = normalizedOffsetForLeaseCleanup(of: scrollView),
+               !CGPointEqualToPoint(scrollView.contentOffset, targetOffset) {
+                scrollView.setContentOffset(targetOffset, animated: false)
+                // The setter is overridable and may synchronously transfer the participant. Never
+                // clear or restore state belonging to that newer owner.
+                guard scrollView.bodragScrollScrollsToTopLease === lease else { return }
+            }
+            scrollView.bodragScrollScrollsToTopLease = nil
+            if scrollView.scrollsToTop != lease.originalValue {
+                scrollView.scrollsToTop = lease.originalValue
+            }
         }
     }
 
+    // 唯一调用方是上面那段已经确认在主 actor 上的清理逻辑，所以这里直接标 `@MainActor`，
+    // 不用再套一层 `assumeIsolated`：读 inset / contentSize / bounds / contentOffset 全是主 actor 状态。
+    @MainActor
     private static func normalizedOffsetForLeaseCleanup(of scrollView: UIScrollView) -> CGPoint? {
         let inset = scrollView.adjustedContentInset
         guard inset.top.isFinite,
@@ -628,26 +650,35 @@ enum BODragScrollUIScrollViewBridge {
     ) -> Bool {
         guard let scrollView = object as? UIScrollView else { return false }
 
-        // Calling the installation-time next IMP directly is deliberate. It gives a primary participant
-        // its host's physical state without recursively following a second BODragScroll association, and
-        // it preserves any hook that was installed before this bridge.
-        let stateOwner: UIScrollView
-        if let link = scrollView.bodragScrollHostLink,
-           link.hierarchy.isValid(expectedPrimary: scrollView),
-           let host = link.host {
-            stateOwner = host
-        } else {
-            if Thread.isMainThread,
-               let staleLink = scrollView.bodragScrollHostLink {
-                DispatchQueue.main.async { [weak host = staleLink.host] in
-                    host?.invalidateCaptureHierarchyIfNeeded(
-                        expectedSessionID: staleLink.captureSessionID
-                    )
+        // 这里是被 swizzle 进 UIScrollView 的 C 函数入口，经 objc_msgSend 调进来，签名上必然
+        // nonisolated；而 `isDragging`/`isTracking`/`isDecelerating` 这三个 getter 按 UIKit 的调用
+        // 约定只在主线程被读，关联对象与 host 状态也都是主 actor 状态。整段用一次
+        // `MainActor.assumeIsolated` 承接这个约定：运行时行为不变，真有客户端从别的线程读就地
+        // trap，比原来跨线程摸 UIKit 状态（静默 UB）更容易发现。
+        return MainActor.assumeIsolated {
+            // Calling the installation-time next IMP directly is deliberate. It gives a primary participant
+            // its host's physical state without recursively following a second BODragScroll association, and
+            // it preserves any hook that was installed before this bridge.
+            let stateOwner: UIScrollView
+            if let link = scrollView.bodragScrollHostLink,
+               link.hierarchy.isValid(expectedPrimary: scrollView),
+               let host = link.host {
+                stateOwner = host
+            } else {
+                // 原来这里还要自己判一次 `Thread.isMainThread` 才敢读关联对象、才敢派发失效检查；
+                // 这个前置条件已经由入口的 `assumeIsolated` 一次性保证（不在主线程根本走不到这里），
+                // 所以只剩「链接是否还在」这一个条件。
+                if let staleLink = scrollView.bodragScrollHostLink {
+                    DispatchQueue.main.async { [weak host = staleLink.host] in
+                        host?.invalidateCaptureHierarchyIfNeeded(
+                            expectedSessionID: staleLink.captureSessionID
+                        )
+                    }
                 }
+                stateOwner = scrollView
             }
-            stateOwner = scrollView
+            return callNext(getter, on: stateOwner, selector: selector)
         }
-        return callNext(getter, on: stateOwner, selector: selector)
     }
 
     private static func install(

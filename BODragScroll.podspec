@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = "BODragScroll"
-  s.version      = "2.2.0"
+  s.version      = "2.2.1"
   s.summary      = "Draggable card scroll panel with nested scrollView support (Swift)."
   s.description  = "Swift port of BODragScrollView: a draggable card-style panel that coordinates with multi-level nested UIScrollViews."
 
