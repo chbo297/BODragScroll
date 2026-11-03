@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "BODragScroll",
     platforms: [
-        .iOS(.v13)
+        .iOS(.v15)
     ],
     products: [
         .library(name: "BODragScroll", targets: ["BODragScroll"])

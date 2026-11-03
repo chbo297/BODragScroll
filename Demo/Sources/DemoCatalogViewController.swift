@@ -87,7 +87,7 @@ final class DemoCatalogViewController: UITableViewController {
         title.font = .systemFont(ofSize: 34, weight: .black)
         title.textColor = DemoPalette.ink
 
-        let badge = DemoBadgeLabel(text: "SWIFT ↔ OC · UIKit · iOS 13+")
+        let badge = DemoBadgeLabel(text: "SWIFT ↔ OC · UIKit · iOS 15+")
         let summary = UILabel()
         summary.text = "选择场景后，可用右上角 OC / Swift 分段标签在重写版和原实现之间重建切换；业务选项会保留，位置与捕获会话会重置。\n\n测试边界：原 OC 的 +load swizzle 在进程内全局生效，因此这里用于行为 A/B，不是两个完全隔离进程的性能对照。"
         summary.font = .preferredFont(forTextStyle: .body)

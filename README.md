@@ -2,7 +2,7 @@
 
 `BODragScroll` 是 [BODragScrollView](https://github.com/chbo297/BODragScrollView) 的纯 Swift 重写。它通过一个统一的纵向滚动轴，协调固定尺寸的 `panelView` 与触摸路径上的一个或多个 `UIScrollView`，支持面板吸附、内部列表交接、嵌套滚动和 Web 内容。
 
-- iOS 13+
+- iOS 15+
 - Swift 5.7+
 - UIKit
 - 无第三方运行时依赖
@@ -14,7 +14,7 @@ Swift Package Manager：
 ```swift
 .package(
     url: "https://github.com/chbo297/BODragScroll.git",
-    from: "2.2.1"
+    from: "2.2.2"
 )
 ```
 

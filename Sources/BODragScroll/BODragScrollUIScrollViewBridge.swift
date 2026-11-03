@@ -143,7 +143,7 @@ final class BODragScrollCaptureHierarchySnapshot {
 
 @MainActor
 extension UIScrollView {
-    /// The inset used by all BODragScroll geometry. The package supports iOS 13 and later, so the
+    /// The inset used by all BODragScroll geometry. The package supports iOS 15 and later, so the
     /// legacy pre-iOS-11 branch from the OC implementation is intentionally unnecessary.
     var effectiveContentInset: UIEdgeInsets {
         adjustedContentInset
